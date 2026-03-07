@@ -1,0 +1,13 @@
+langchain
+langchain_ollama
+langgraph
+langchain-mcp-adapters
+fastmcp
+pydantic
+openai
+requests
+httpx
+python-dotenv
+pywin32
+send2trash
+duckduckgo-search
