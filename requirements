@@ -10,4 +10,4 @@ httpx
 python-dotenv
 pywin32
 send2trash
-duckduckgo-search
+tavily-python

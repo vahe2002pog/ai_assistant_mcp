@@ -9,12 +9,18 @@ import shutil
 import datetime
 from typing import Union
 from send2trash import send2trash
+try:
+    import win32com.client
+    import pythoncom
+    HAS_WIN32COM = True
+except ImportError:
+    HAS_WIN32COM = False
 
 # Добавляем родительскую папку в sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from .mcp_core import mcp, logger, get_system_path
-from database import cache_put, cache_get, cache_list, history_push, history_pop
+from database import cache_put, cache_get, cache_list, history_push, history_pop, history_get_last, history_remove_last
 
 
 @mcp.tool
@@ -510,7 +516,7 @@ def delete_item(file_id: int) -> str:
     Помещает файл или папку в КОРЗИНУ по идентификатору из кэша.
     
     ВНИМАНИЕ: ПЕРЕД ВЫЗОВОМ ЭТОГО ИНСТРУМЕНТА ТЫ ОБЯЗАН СПРОСИТЬ У ПОЛЬЗОВАТЕЛЯ 
-    ПОДТВЕРЖДЕНИЕ ГОЛОСОМ ИЛИ ТЕКСТОМ! 
+    ПОДТВЕРЖДЕНИЕ, ОН ДОЛЖЕН ЯВНО ОТВЕТИТЬ ПОЛОЖИТЕЛЬНО! 
     Не вызывай этот инструмент, пока пользователь явно не ответит "Да", "Удаляй" или подобное.
     
     Args:
@@ -546,26 +552,31 @@ def undo_last_action() -> str:
     - rename: Возвращает файл/папку на исходное имя
     - copy: Удаляет скопированный файл/папку
     - move: Перемещает файл обратно в исходное местоположение
-    - delete: Сообщает пользователю восстановить из Корзины вручную
+    - delete: Восстанавливает файл из Корзины
+    - restore: Удаляет файл обратно в Корзину
     
     Returns:
         str: Сообщение об успешно отмене или описание ошибки.
     """
-    action = history_pop()
+    action = history_get_last()
     if not action:
         return "В базе данных нет истории действий для отмены."
         
     type_ = action.get("type")
     payload = action.get("payload", {})
     
+    logger.info(f"undo_last_action: отмена {type_}")
+    
     try:
         if type_ == "create":
             path = payload.get("path")
             if path and os.path.exists(path):
                 if payload.get("is_folder"):
-                    os.rmdir(path)
+                    shutil.rmtree(path)  # удаляет папку со всем содержимым
                 else:
                     os.remove(path)
+            history_remove_last()
+            logger.info(f"undo_last_action: успешно отменено create для {path}")
             return f"Отменено: созданный элемент '{os.path.basename(path)}' удален."
             
         elif type_ == "rename":
@@ -573,6 +584,8 @@ def undo_last_action() -> str:
             new_path = payload.get("new_path")
             if new_path and os.path.exists(new_path):
                 os.rename(new_path, old_path)
+            history_remove_last()
+            logger.info(f"undo_last_action: успешно отменено rename")
             return f"Отменено: имя '{os.path.basename(new_path)}' возвращено на исходное."
             
         elif type_ == "copy":
@@ -582,6 +595,8 @@ def undo_last_action() -> str:
                     shutil.rmtree(dest_path)
                 else:
                     os.remove(dest_path)
+            history_remove_last()
+            logger.info(f"undo_last_action: успешно отменено copy")
             return f"Отменено: скопированный элемент '{os.path.basename(dest_path)}' удален."
             
         elif type_ == "move":
@@ -589,14 +604,34 @@ def undo_last_action() -> str:
             new_path = payload.get("new_path")
             if new_path and os.path.exists(new_path):
                 shutil.move(new_path, old_path)
+            history_remove_last()
+            logger.info(f"undo_last_action: успешно отменено move")
             return f"Отменено: файл перемещен обратно в исходную папку."
             
         elif type_ == "delete":
-            return "Отмена удаления не поддерживается программой (файл находится в Корзине Windows). Пожалуйста, восстановите его вручную из Корзины."
+            # Отмена удаления не поддерживается, файл находится в Корзине
+            return "Отмена удаления не поддерживается программой. Файл находится в Корзине Windows. Восстановите его вручную из Корзины или используйте стороннее ПО для восстановления."
             
     except Exception as e:
-        # Если произошла ошибка при отмене, возвращаем запись обратно в БД
-        history_push(type_, payload)
+        logger.error(f"undo_last_action: критическая ошибка при отмене {type_}: {e}")
         return f"Не удалось выполнить отмену: {e}"
         
     return "Неизвестное действие в истории."
+
+
+@mcp.tool
+def open_recycle_bin() -> str:
+    """
+    Открывает Корзину Windows в Проводнике.
+
+    Returns:
+        str: Сообщение об успешном открытии Корзины или описание возникшей ошибки.
+    """
+    print("Вызван open_recycle_bin")
+    try:
+        os.startfile("shell:RecycleBinFolder")
+        logger.info("open_recycle_bin: Корзина открыта успешно")
+        return "Корзина Windows открыта."
+    except Exception as e:
+        logger.error(f"open_recycle_bin: ошибка при открытии Корзины: {e}")
+        return f"Не удалось открыть Корзину: {e}"

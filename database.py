@@ -161,6 +161,31 @@ def history_push(action_type: str, payload: dict) -> None:
         conn.close()
 
 
+def history_get_last() -> Optional[dict]:
+    """Возвращает последнее действие из БД без удаления."""
+    conn = _get_conn()
+    try:
+        cur = conn.execute("SELECT action_type, payload FROM action_history ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            return None
+        
+        action_type, payload = row
+        return {"type": action_type, "payload": json.loads(payload)}
+    finally:
+        conn.close()
+
+
+def history_remove_last() -> None:
+    """Удаляет последнее действие из БД."""
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM action_history WHERE id = (SELECT MAX(id) FROM action_history)")
+        _log("HISTORY REMOVE LAST")
+    finally:
+        conn.close()
+
+
 def history_pop() -> Optional[dict]:
     """Извлекает и удаляет последнее действие из БД."""
     conn = _get_conn()

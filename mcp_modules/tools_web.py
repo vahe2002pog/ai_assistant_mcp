@@ -1,7 +1,8 @@
-from duckduckgo_search import DDGS
+from tavily import TavilyClient
 from .mcp_core import mcp
 import os
 import urllib.parse
+from config import TAVILY_API_KEY
 
 @mcp.tool
 def web_search(query: str, max_results: int = 5) -> str:
@@ -17,18 +18,22 @@ def web_search(query: str, max_results: int = 5) -> str:
     Returns:
         str: Текст с результатами поиска (заголовок, ссылка и краткое описание).
     """
+    print(f"Вызван web_search с query: {query}, max_results: {max_results}")
     try:
+        if not TAVILY_API_KEY:
+            return "Ошибка: TAVILY_API_KEY не установлен в переменных окружения."
+        
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        response = client.search(query=query, max_results=max_results)
+        
         results = []
-        # Используем контекстный менеджер DDGS
-        with DDGS() as ddgs:
-            # text() ищет обычные веб-страницы
-            for r in ddgs.text(query, max_results=max_results):
-                title = r.get("title", "Нет заголовка")
-                href = r.get("href", "")
-                body = r.get("body", "Нет описания")
-                
-                results.append(f"📌 {title}\n🔗 {href}\n📝 {body}\n")
-                
+        for r in response.get("results", []):
+            title = r.get("title", "Нет заголовка")
+            href = r.get("url", "")
+            body = r.get("content", "Нет описания")
+            
+            results.append(f"📌 {title}\n🔗 {href}\n📝 {body}\n")
+            
         if not results:
             return f"По запросу '{query}' ничего не найдено."
             
@@ -36,6 +41,154 @@ def web_search(query: str, max_results: int = 5) -> str:
         
     except Exception as e:
         return f"Ошибка при поиске в интернете: {e}"
+
+
+@mcp.tool
+def tavily_search(query: str, max_results: int = 5, search_depth: str = "advanced") -> str:
+    """
+    Выполняет поисковый запрос в интернете и возвращает релевантные, сжатые результаты, 
+    часто с фрагментами текста и ссылками, оптимизированные для использования в системах искусственного интеллекта.
+    
+    Args:
+        query (str): Поисковый запрос.
+        max_results (int): Количество результатов (по умолчанию 5, максимум 10).
+        search_depth (str): Глубина поиска ("basic" или "advanced", по умолчанию "advanced").
+        
+    Returns:
+        str: Текст с результатами поиска.
+    """
+    print(f"Вызван tavily_search с query: {query}, max_results: {max_results}, search_depth: {search_depth}")
+    try:
+        if not TAVILY_API_KEY:
+            return "Ошибка: TAVILY_API_KEY не установлен."
+        
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        response = client.search(query=query, max_results=max_results, search_depth=search_depth)
+        
+        results = []
+        for r in response.get("results", []):
+            title = r.get("title", "Нет заголовка")
+            href = r.get("url", "")
+            body = r.get("content", "Нет описания")
+            score = r.get("score", 0)
+            
+            results.append(f"📌 {title} (Score: {score})\n🔗 {href}\n📝 {body}\n")
+            
+        if not results:
+            return f"По запросу '{query}' ничего не найдено."
+            
+        return f"Результаты поиска Tavily по запросу '{query}':\n\n" + "\n".join(results)
+        
+    except Exception as e:
+        return f"Ошибка при поиске Tavily: {e}"
+
+
+@mcp.tool
+def tavily_extract(urls: list[str]) -> str:
+    """
+    Этот инструмент позволяет получить полное содержимое одного или нескольких указанных URL-адресов, 
+    возвращая чистый текст или разметку Markdown с веб-страниц. Это инструмент для прямого веб-скрейпинга.
+    
+    Args:
+        urls (list[str]): Список URL-адресов для извлечения.
+        
+    Returns:
+        str: Извлеченный контент в формате Markdown.
+    """
+    print(f"Вызван tavily_extract с urls: {urls}")
+    try:
+        if not TAVILY_API_KEY:
+            return "Ошибка: TAVILY_API_KEY не установлен."
+        
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        response = client.extract(urls=urls)
+        
+        results = []
+        for item in response.get("results", []):
+            url = item.get("url", "")
+            content = item.get("content", "Нет контента")
+            results.append(f"🔗 {url}\n📄 {content}\n")
+            
+        if not results:
+            return "Не удалось извлечь контент."
+            
+        return "Извлеченный контент:\n\n" + "\n".join(results)
+        
+    except Exception as e:
+        return f"Ошибка при извлечении: {e}"
+
+
+@mcp.tool
+def tavily_crawl(url: str, max_requests_per_minute: int = 10) -> str:
+    """
+    Более мощный веб-сканер на основе графов, который систематически исследует весь веб-сайт 
+    (например, сайт документации или базу знаний), переходя по ссылкам и извлекая контент параллельно 
+    для создания исчерпывающей карты сайта или набора данных.
+    
+    Args:
+        url (str): URL сайта для сканирования.
+        max_requests_per_minute (int): Максимальное количество запросов в минуту (по умолчанию 10).
+        
+    Returns:
+        str: Карта сайта с извлеченным контентом.
+    """
+    print(f"Вызван tavily_crawl с url: {url}, max_requests_per_minute: {max_requests_per_minute}")
+    try:
+        if not TAVILY_API_KEY:
+            return "Ошибка: TAVILY_API_KEY не установлен."
+        
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        response = client.crawl(url=url, max_requests_per_minute=max_requests_per_minute)
+        
+        results = []
+        for item in response.get("results", []):
+            page_url = item.get("url", "")
+            content = item.get("content", "Нет контента")
+            results.append(f"🔗 {page_url}\n📄 {content[:500]}...\n")  # Ограничим для краткости
+            
+        if not results:
+            return "Не удалось просканировать сайт."
+            
+        return f"Карта сайта {url}:\n\n" + "\n".join(results)
+        
+    except Exception as e:
+        return f"Ошибка при сканировании: {e}"
+
+
+@mcp.tool
+def tavily_map(url: str, max_pages: int = 100) -> str:
+    """
+    Программа осуществляет обход веб-сайтов для создания структурированной карты содержимого сайта 
+    с целью интеллектуального поиска.
+    
+    Args:
+        url (str): URL сайта для создания карты.
+        max_pages (int): Максимальное количество страниц (по умолчанию 100).
+        
+    Returns:
+        str: Структурированная карта сайта.
+    """
+    print(f"Вызван tavily_map с url: {url}, max_pages: {max_pages}")
+    try:
+        if not TAVILY_API_KEY:
+            return "Ошибка: TAVILY_API_KEY не установлен."
+        
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        response = client.map(url=url, max_pages=max_pages)
+        
+        results = []
+        for item in response.get("results", []):
+            page_url = item.get("url", "")
+            title = item.get("title", "Нет заголовка")
+            results.append(f"📌 {title}\n🔗 {page_url}\n")
+            
+        if not results:
+            return "Не удалось создать карту сайта."
+            
+        return f"Карта сайта {url}:\n\n" + "\n".join(results)
+        
+    except Exception as e:
+        return f"Ошибка при создании карты: {e}"
 
 
 @mcp.tool
