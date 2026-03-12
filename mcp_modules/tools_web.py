@@ -4,50 +4,51 @@ import os
 import urllib.parse
 from config import TAVILY_API_KEY
 
-@mcp.tool
-def web_search(query: str, max_results: int = 5) -> str:
-    """
-    Выполняет поиск в интернете по запросу и возвращает список результатов.
-    Используй этот инструмент, чтобы отвечать на вопросы о текущих событиях, 
-    погоде, новостях или фактах, которых ты не знаешь.
+# @mcp.tool
+# def web_search(query: str, max_results: int = 5) -> str:
+#     """
+#     Выполняет поиск в интернете по запросу и возвращает список результатов.
+#     Используй этот инструмент, чтобы отвечать на вопросы о текущих событиях, 
+#     погоде, новостях или фактах, которых ты не знаешь.
     
-    Args:
-        query (str): Поисковый запрос.
-        max_results (int): Количество результатов (по умолчанию 5, максимум 10).
+#     Args:
+#         query (str): Поисковый запрос.
+#         max_results (int): Количество результатов (по умолчанию 5, максимум 10).
         
-    Returns:
-        str: Текст с результатами поиска (заголовок, ссылка и краткое описание).
-    """
-    print(f"Вызван web_search с query: {query}, max_results: {max_results}")
-    try:
-        if not TAVILY_API_KEY:
-            return "Ошибка: TAVILY_API_KEY не установлен в переменных окружения."
+#     Returns:
+#         str: Текст с результатами поиска (заголовок, ссылка и краткое описание).
+#     """
+#     print(f"Вызван web_search с query: {query}, max_results: {max_results}")
+#     try:
+#         if not TAVILY_API_KEY:
+#             return "Ошибка: TAVILY_API_KEY не установлен в переменных окружения."
         
-        client = TavilyClient(api_key=TAVILY_API_KEY)
-        response = client.search(query=query, max_results=max_results)
+#         client = TavilyClient(api_key=TAVILY_API_KEY)
+#         response = client.search(query=query, max_results=max_results)
         
-        results = []
-        for r in response.get("results", []):
-            title = r.get("title", "Нет заголовка")
-            href = r.get("url", "")
-            body = r.get("content", "Нет описания")
+#         results = []
+#         for r in response.get("results", []):
+#             title = r.get("title", "Нет заголовка")
+#             href = r.get("url", "")
+#             body = r.get("content", "Нет описания")
             
-            results.append(f"📌 {title}\n🔗 {href}\n📝 {body}\n")
+#             results.append(f"📌 {title}\n🔗 {href}\n📝 {body}\n")
             
-        if not results:
-            return f"По запросу '{query}' ничего не найдено."
+#         if not results:
+#             return f"По запросу '{query}' ничего не найдено."
             
-        return f"Результаты поиска по запросу '{query}':\n\n" + "\n".join(results)
+#         return f"Результаты поиска по запросу '{query}':\n\n" + "\n".join(results)
         
-    except Exception as e:
-        return f"Ошибка при поиске в интернете: {e}"
+#     except Exception as e:
+#         return f"Ошибка при поиске в интернете: {e}"
 
 
 @mcp.tool
 def tavily_search(query: str, max_results: int = 5, search_depth: str = "advanced") -> str:
     """
     Выполняет поисковый запрос в интернете и возвращает релевантные, сжатые результаты, 
-    часто с фрагментами текста и ссылками, оптимизированные для использования в системах искусственного интеллекта.
+    часто с фрагментами текста и ссылками.
+    Обязательно выполни tavily_extract для получения актуальных данных из сайта.
     
     Args:
         query (str): Поисковый запрос.
@@ -111,9 +112,8 @@ def tavily_extract(urls: list[str]) -> str:
             
         if not results:
             return "Не удалось извлечь контент."
-            
+
         return "Извлеченный контент:\n\n" + "\n".join(results)
-        
     except Exception as e:
         return f"Ошибка при извлечении: {e}"
 
