@@ -126,7 +126,7 @@ def cache_list() -> Dict[int, str]:
         result: Dict[int, str] = {}
         for k, v in rows:
             if isinstance(v, str) and os.path.exists(v):
-                result[k] = os.path.basename(v)
+                result[k] = v
             else:
                 result[k] = str(v)
         _log(f"LIST keys={list(result.keys())}")

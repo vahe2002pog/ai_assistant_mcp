@@ -129,6 +129,7 @@ def list_directory(directory: Union[str, int]) -> str:
         - Если список содержит ID, используй это ID в следующем вызове list_directory
         - Например: получил "1: AI_assistant_MCP" -> следующий вызов list_directory(1)
         - Ограничение в 50 элементов предотвращает слишком длинный вывод
+        - Не пытайся открывать папки имея только их название, если это не системная папка. Всегда используй ID из кэша для доступа к папкам!
     """
     # Если это ID из кэша
     if isinstance(directory, int):
@@ -164,13 +165,13 @@ def list_directory(directory: Union[str, int]) -> str:
 def view_cache() -> str:
     """
     Возвращает текущие элементы кэша в формате:
-    id: preview (например, имя файла).
+    id: preview (например, полный путь файла).
 
     Returns:
         str: Список элементов кэша или сообщение о пустом кэше.
 
     Examples:
-        view_cache() -> "1: file1.txt\n2: file2.docx"
+        view_cache() -> "1: C:\\Users\\User\\Documents\\file1.txt\n2: C:\\Users\\User\\Documents\\file2.docx"
     """
     items = cache_list()
     lines = [f"{k}: {v}" for k, v in items.items()]
@@ -439,6 +440,47 @@ def read_file(file_id: int) -> str:
 
 
 @mcp.tool
+def edit_file(file_id: int, content: str, mode: str = "append") -> str:
+    """
+    Редактирует текстовый файл.
+    
+    Args:
+        file_id (int): ID файла в кэше.
+        content (str): Текст для записи.
+        mode (str): Режим работы: 
+            'append' — добавить в конец файла (с новой строки).
+            'overwrite' — полностью заменить содержимое файла.
+            
+    Returns:
+        str: Результат операции.
+    """
+    path = cache_get(file_id)
+    if not path or not os.path.exists(path):
+        return f"Файл с id={file_id} не найден."
+    
+    if os.path.isdir(path):
+        return "Ошибка: Это папка, а не файл."
+
+    try:
+        # Сохраняем состояние для Undo
+        with open(path, 'r', encoding='utf-8') as f:
+            old_content = f.read()
+            
+        if mode == "overwrite":
+            new_content = content
+        else:
+            new_content = old_content + "\n" + content
+            
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+            
+        history_push("edit", {"path": path, "old_content": old_content})
+        return f"Файл '{os.path.basename(path)}' успешно обновлен."
+    except Exception as e:
+        return f"Ошибка редактирования: {e}"
+
+
+@mcp.tool
 def get_file_info(file_id: int) -> str:
     """
     Возвращает подробную информацию о файле или папке.
@@ -607,6 +649,15 @@ def undo_last_action() -> str:
             history_remove_last()
             logger.info(f"undo_last_action: успешно отменено move")
             return f"Отменено: файл перемещен обратно в исходную папку."
+
+        elif type_ == "edit":
+            path = payload.get("path")
+            old_content = payload.get("old_content")
+            if path and os.path.exists(path):
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(old_content)
+            history_remove_last()
+            return "Отменено: содержимое файла возвращено к предыдущей версии."
             
         elif type_ == "delete":
             # Отмена удаления не поддерживается, файл находится в Корзине
