@@ -11,3 +11,7 @@ python-dotenv
 pywin32
 send2trash
 tavily-python
+pycaw
+comtypes
+pyautogui
+uiautomation

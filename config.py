@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL_NAMES = ["gpt-oss:120b-cloud","qwen3.5:4b", "lfm2.5-thinking:1.2b-bf16"]
+MODEL_NAMES = ["gpt-oss:120b-cloud","qwen3.5:4b", "qwen2.5vl:3b"]
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
@@ -36,6 +36,11 @@ system_prompt = """Ты — системный голосовой ассисте
 • игнорировать ID из кэша
 
 Кэш — внутренний механизм. В ответе не упомниай про него.
+
+ПРАВИЛА UI AUTOMATION:
+1. Если пользователь просит нажать кнопку, найти элемент или ввести текст в окне приложения — используй инструменты uiautomation.
+2. Сначала всегда вызывай `uiautomation_list_windows` или `uiautomation_get_elements`, чтобы получить актуальную структуру окна.
+3. Никогда не пытайся "угадать" ID элемента, всегда бери его из результатов `uiautomation_get_elements`.
 
 РАБОТА С ССЫЛКАМИ
 Перед открытием ссылки спроси пользователя:
