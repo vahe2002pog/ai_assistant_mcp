@@ -5,3 +5,5 @@ cache.db
 mcp_modules/UIAutomationMCP/*
 mcp_uiautomation/__pycache__/*
 mcp_uiautomation/tools/__pycache__/*
+TOOLS_DOCUMENTATION.md
+@AutomationLog.txt

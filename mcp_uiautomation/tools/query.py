@@ -182,7 +182,7 @@ def register_query_tools(mcp: FastMCP):
     def ui_screenshot(
         handle: int,
         savePath: Optional[str] = None,
-        captureCursor: bool = False,
+        captureCursor: Optional[bool] = None,
     ) -> dict:
         """Сделать снимок экрана указанного контрола.
 
@@ -195,6 +195,10 @@ def register_query_tools(mcp: FastMCP):
             Путь к сохранённому изображению
         """
         check_admin()
+
+        # Обработка значения по умолчанию
+        if captureCursor is None:
+            captureCursor = False
 
         try:
             control = get_control_by_handle(handle)
@@ -221,7 +225,7 @@ def register_query_tools(mcp: FastMCP):
     @mcp.tool()
     def ui_exists(
         handle: int,
-        timeout: float = 0,
+        timeout: Optional[float] = None,
     ) -> dict:
         """Проверить, существует ли контрол.
 
@@ -233,6 +237,10 @@ def register_query_tools(mcp: FastMCP):
             Флаг существования контрола
         """
         check_admin()
+
+        # Обработка значения по умолчанию
+        if timeout is None:
+            timeout = 0
 
         try:
             control = get_control_by_handle(handle)
@@ -253,7 +261,7 @@ def register_query_tools(mcp: FastMCP):
     @mcp.tool()
     def ui_wait_for(
         condition: str,
-        timeout: float = 10,
+        timeout: Optional[float] = None,
         parentHandle: Optional[int] = None,
     ) -> dict:
         """Ожидать выполнения условия.
@@ -267,6 +275,10 @@ def register_query_tools(mcp: FastMCP):
             Информация, выполнено ли условие
         """
         check_admin()
+
+        # Обработка значения по умолчанию
+        if timeout is None:
+            timeout = 10
 
         try:
             start = time.time()

@@ -30,13 +30,26 @@ def register_pattern_tools(mcp: FastMCP):
 
     @mcp.tool()
     def ui_invoke(handle: int) -> dict:
-        """Выполнить Invoke на контроле (InvokePattern).
+        """Выполнить Invoke на контроле - активировать элемент как будто на него кликнули.
+
+        InvokePattern - это стандартный паттерн для активации элементов. Используется для
+        кнопок, пунктов меню и других элементов, которые можно \"активировать\".
+        Это надёжнее, чем ручной клик, потому что работает через интерфейс Accessibility.
 
         Args:
-            handle: Дескриптор контрола
+            handle: Дескриптор контрола (обычно кнопа или пункт меню)
+                    Должен поддерживать InvokePattern
 
         Returns:
-            Результат выполнения
+            {\"success\": true, \"data\": {\"action\": \"invoke\"}}
+
+        Примеры:
+            - ui_invoke(handle=ok_button) - активировать кнопку OK
+            - ui_invoke(handle=menu_item) - активировать пункт меню
+            - ui_invoke(handle=link) - активировать гиперссылку
+
+        Совет:
+            Сначала попробуйте ui_invoke, если вернёт ошибку про Pattern - используйте ui_click.
         """
         check_admin()
 
@@ -93,7 +106,7 @@ def register_pattern_tools(mcp: FastMCP):
     @mcp.tool()
     def ui_expand_collapse(
         handle: int,
-        action: str = "expand",
+        action: Optional[str] = None,
     ) -> dict:
         """Развернуть или свернуть контрол (ExpandCollapsePattern).
 
@@ -105,6 +118,10 @@ def register_pattern_tools(mcp: FastMCP):
             Результат выполнения
         """
         check_admin()
+
+        # Обработка значения по умолчанию
+        if action is None:
+            action = "expand"
 
         try:
             control = get_control_by_handle(handle)
@@ -168,8 +185,8 @@ def register_pattern_tools(mcp: FastMCP):
     @mcp.tool()
     def ui_scroll(
         handle: int,
-        direction: str = "down",
-        amount: str = "large",
+        direction: Optional[str] = None,
+        amount: Optional[str] = None,
     ) -> dict:
         """Прокрутить контрол с помощью ScrollPattern или колесика мыши.
 
@@ -182,6 +199,12 @@ def register_pattern_tools(mcp: FastMCP):
             Результат выполнения
         """
         check_admin()
+
+        # Обработка значений по умолчанию
+        if direction is None:
+            direction = "down"
+        if amount is None:
+            amount = "large"
 
         try:
             control = get_control_by_handle(handle)

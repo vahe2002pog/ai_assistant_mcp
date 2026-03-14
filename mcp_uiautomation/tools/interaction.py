@@ -12,9 +12,6 @@ import uiautomation as auto
 from ..core import (
     get_control_by_handle,
     format_error,
-    create_confirmation,
-    confirm_operation,
-    is_dangerous_tool,
     check_admin,
     init_com,
 )
@@ -38,26 +35,65 @@ def register_interaction_tools(mcp: FastMCP):
         handle: Optional[int] = None,
         x: Optional[int] = None,
         y: Optional[int] = None,
-        button: str = "left",
-        double: bool = False,
+        button: Optional[str] = None,
+        double: Optional[bool] = None,
     ) -> dict:
-        """Клик по контролу или по экранным координатам.
+        """Клик по элементу или по экранным координатам. Основной инструмент для взаимодействия.
+
+        Поддерживает два режима работы:
+        1. Клик по элементу (через handle) - клик по его центру
+        2. Клик по абсолютным координатам - прямой клик в точку экрана
 
         Args:
-            handle: Дескриптор контрола (клик по центру, если не заданы x/y)
-            x: Относительный X от центра контрола или абсолютный при отсутствии handle
-            y: Относительный Y от центра контрола или абсолютный при отсутствии handle
-            button: Кнопка мыши (left, right, middle)
-            double: Двойной клик
+            handle: Дескриптор контрола для клика по его центру
+                    Может быть из ui_find_control или ui_find_window
+                    ВАЖНО: Если handle=0 (Modern UI), используйте координаты x/y вместо этого
+            x: X-координата для клика
+                    При наличии handle: смещение от центра контрола
+                    При отсутствии handle: абсолютная координата на экране (в пикселях)
+                    СОВЕТ: Для Modern UI используйте center_x из ui_get_children
+            y: Y-координата для клика
+                    При наличии handle: смещение от центра контрола
+                    При отсутствии handle: абсолютная координата на экране (в пикселях)
+                    СОВЕТ: Для Modern UI используйте center_y из ui_get_children
+            button: Кнопка мыши для клика (по умолчанию: \"left\")
+                    Варианты: \"left\" (левая), \"right\" (правая), \"middle\" (средняя)
+                    Пример: button=\"right\" для контекстного меню
+            double: Двойной клик? (по умолчанию: false)
+                    true - двойной клик (открыть файл, развернуть окно)
+                    false - одиночный клик
 
         Returns:
-            Результат выполнения (успех/ошибка)
+            {\"success\": true, \"data\": {\"action\": \"click\", ...}}
+
+        Примеры использования:
+            - ui_click(handle=button_handle) 
+              Клик по кнопке по её центру
+            - ui_click(x=512, y=384)
+              Клик по абсолютным координатам (1024x768 экран, центр)
+            - ui_click(handle=document, button=\"right\")
+              Правый клик для контекстного меню
+            - ui_click(handle=file_item, double=True)
+              Двойной клик для открытия файла/папки
+            - ui_click(x=center_x, y=center_y) где центр из Modern UI
+              Клик по элементу Office Ribbon (которые имеют handle=0)
+
+        ⚠️ ВАЖНО для Modern UI (Office Ribbon, Fluent UI):
+            Эти элементы имеют handle=0 и не поддерживают стандартное взаимодействие.
+            Решение: используйте координаты центра {\"center_x\": X, \"center_y\": Y}
+            которые возвращает ui_get_children.
         """
         check_admin()
 
+        # Обработка значений по умолчанию
+        if button is None:
+            button = "left"
+        if double is None:
+            double = False
+
         try:
-            # Click at absolute coordinates
-            if handle is None and x is not None and y is not None:
+            # Click at absolute coordinates (handle=0 или явно заданы x/y)
+            if (handle is None or handle == 0) and x is not None and y is not None:
                 if button == "right":
                     auto.RightClick(x, y)
                 elif button == "middle":
@@ -66,9 +102,16 @@ def register_interaction_tools(mcp: FastMCP):
                     auto.DoubleClick(x, y)
                 else:
                     auto.Click(x, y)
-                return {"success": True, "data": {"action": "click", "x": x, "y": y}}
+                return {"success": True, "data": {"action": "click", "x": x, "y": y, "method": "coordinates"}}
 
-            # Click on control
+            # Click on control (only if handle is not 0)
+            if handle == 0:
+                return format_error(
+                    "INVALID_HANDLE",
+                    "Контрол имеет handle=0 (Modern UI элемент). Передайте координаты x/y вместо handle.",
+                    ["Используйте rect координаты из ui_get_children: центр = (left+right)/2, (top+bottom)/2"]
+                )
+
             control = get_control_by_handle(handle)
             if not control:
                 return format_error(
@@ -86,7 +129,7 @@ def register_interaction_tools(mcp: FastMCP):
             else:
                 control.Click(x, y)
 
-            return {"success": True, "data": {"action": "click", "handle": handle}}
+            return {"success": True, "data": {"action": "click", "handle": handle, "method": "control"}}
 
         except Exception as e:
             logger.exception("ui_click failed")
@@ -96,19 +139,35 @@ def register_interaction_tools(mcp: FastMCP):
     def ui_send_keys(
         handle: int,
         text: str,
-        interval: float = 0.05,
+        interval: Optional[float] = None,
     ) -> dict:
-        """Отправить клавиатурный ввод в контрол.
+        """Отправить клавиатурный ввод текста и команд. Полностью поддерживает горячие клавиши.
+
+        Позволяет отправить текст, специальные клавиши и комбинации в фокусированный элемент.
+        Очень полезен для ввода текста в текстовые поля без использования буфера обмена.
 
         Args:
-            handle: Дескриптор контрола
-            text: Текст/комбинации клавиш (например, {Ctrl}, {Enter})
-            interval: Интервал между нажатиями в секундах
+            handle: Дескриптор контрола (обычно текстовое поле, редактор)
+                    Сначала убедитесь, что контрол в фокусе через ui_click
+            text: Текст для отправки или комбинации клавиш
+                    Обычный текст: "Hello World"
+                    Специальные клавиши: {Enter}, {Backspace}, {Delete}, {Escape}
+                    Функциональные: {Home}, {End}, {PageUp}, {PageDown}
+                    Комодификаторы: {Ctrl}, {Shift}, {Alt}, {LWin}
+                    Комбинации: {Ctrl}a (выделить всё), {Ctrl}c (копировать), {Ctrl}v (вставить)
+            interval: Интервал между нажатиями символов в секундах (по умолчанию: 0.05)
+                    Используйте больший интервал если приложение требует паузы
 
         Returns:
-            Результат выполнения
+            {"success": true, "data": {"action": "send_keys", "text": text}}
+
+        Примеры: ui_send_keys(handle=field, text="{Ctrl}a{Delete}")
         """
         check_admin()
+
+        # Обработка значения по умолчанию
+        if interval is None:
+            interval = 0.05
 
         try:
             control = get_control_by_handle(handle)
@@ -130,14 +189,23 @@ def register_interaction_tools(mcp: FastMCP):
         handle: int,
         value: str,
     ) -> dict:
-        """Установить значение текста в контроле с помощью ValuePattern.
+        """Установить значение элемента напрямую через ValuePattern (директное взаимодействие).
+
+        Более надёжный метод для установки значения, чем ui_send_keys. Работает через
+        интерфейс AccessibleValue, поэтому не требует фокуса и имитации нажатий.
+        Идеален для текстовых полей, слайдеров, спиннеров и элементов ввода.
 
         Args:
-            handle: Дескриптор контрола
-            value: Устанавливаемое значение
+            handle: Дескриптор контрола (обычно текстовое поле, число, дата)
+                    Должен поддерживать ValuePattern
+            value: Новое значение для установки
 
         Returns:
-            Результат выполнения
+            {"success": true, "data": {"action": "set_value", "value": value}}
+
+        Совет:
+            Сначала попробуйте ui_set_value (быстрее), если ошибка про Pattern - 
+            используйте ui_send_keys.
         """
         check_admin()
 
@@ -165,18 +233,25 @@ def register_interaction_tools(mcp: FastMCP):
             return format_error("INTERNAL_ERROR", str(e))
 
     @mcp.tool()
-    def ui_close_window(
-        handle: int,
-        confirmationToken: Optional[str] = None,
-    ) -> dict:
-        """Закрыть окно. Требует подтверждения.
+    def ui_close_window(handle: int) -> dict:
+        """Закрыть окно или приложение без запроса подтверждения.
+
+        Закрывает окно, используя WindowPattern.Close или Alt+F4 как fallback.
+        Полезен для закрытия приложений после завершения работы с ними.
 
         Args:
-            handle: Дескриптор окна
-            confirmationToken: Токен подтверждения (если требуется)
+            handle: Дескриптор окна (из ui_find_window, ui_list_windows)
+                    ВНИМАНИЕ: Закрет окно насильно без сохранения данных!
 
         Returns:
-            Запрос на подтверждение, успешный результат или ошибка
+            {"success": true, "data": {"action": "close_window"}}
+
+        Примеры:
+            - ui_close_window(handle=notepad_handle) - закрыть Блокнот
+            - ui_close_window(handle=word_window) - закрыть Word
+
+        ⚠️ Будьте осторожны - окно будет закрыто БЕЗ СОХРАНЕНИЯ ДАННЫХ!
+        Используйте ui_send_keys(handle, "{Ctrl}s") перед этим если нужно сохранить.
         """
         check_admin()
 
@@ -188,25 +263,15 @@ def register_interaction_tools(mcp: FastMCP):
                     f"Некорректный дескриптор окна: {handle}",
                 )
 
-            # Check if confirmation is needed
-            if config.confirmation_enabled and not confirmationToken:
-                request = create_confirmation(
-                    "ui_close_window",
-                    {"windowName": control.Name, "handle": handle},
-                    f"В основном, закрыть окно «{control.Name}», нужно подтверждение?",
-                )
-                return {"success": False, "requiresConfirmation": True, "confirmation": request.model_dump()}
-
-            # Verify confirmation token
-            if config.confirmation_enabled and confirmationToken:
-                result = confirm_operation(confirmationToken, True)
-                if not result:
-                    return format_error("INVALID_CONFIRMATION", "Токен подтверждения невалидный или истек")
-
             # Close the window
             pattern = control.GetWindowPattern()
             if pattern:
-                pattern.Close()
+                try:
+                    pattern.Close()
+                except Exception:
+                    # Fallback to Alt+F4
+                    control.SetFocus()
+                    auto.SendKeys("{Alt}{F4}")
             else:
                 # Fallback to Alt+F4
                 control.SetFocus()
@@ -226,17 +291,29 @@ def register_interaction_tools(mcp: FastMCP):
         width: Optional[int] = None,
         height: Optional[int] = None,
     ) -> dict:
-        """Переместить и/или изменить размер окна.
+        """Переместить окно в новую позицию и/или изменить его размер.
+
+        Позволяет контролировать положение и размеры окна приложения. Полезно для
+        организации нескольких окон на экране или подготовки к скриншотам.
 
         Args:
             handle: Дескриптор окна
-            x: Новая позиция X (необязательно)
-            y: Новая позиция Y (необязательно)
-            width: Новая ширина (необязательно)
-            height: Новая высота (необязательно)
+            x: Новая X-позиция (левый край в пикселях, от левого края экрана)
+                По умолчанию: не меняется
+            y: Новая Y-позиция (верхний край в пикселях, от верхнего края экрана)
+                По умолчанию: не меняется
+            width: Новая ширина окна в пикселях
+                По умолчанию: не меняется
+            height: Новая высота окна в пикселях
+                По умолчанию: не меняется
 
         Returns:
-            Результат выполнения
+            {"success": true, "data": {...}}
+
+        Примеры:
+            - ui_move_window(handle=window, x=100, y=100) - переместить с левый-верх
+            - ui_move_window(handle=window, width=800, height=600) - изменить размер
+            - ui_move_window(handle=window, x=0, y=0, width=512, height=384) - всё вместе
         """
         check_admin()
 
@@ -266,13 +343,20 @@ def register_interaction_tools(mcp: FastMCP):
 
     @mcp.tool()
     def ui_minimize_window(handle: int) -> dict:
-        """Свернуть окно в панель задач.
+        """Свернуть окно в панель задач (minimize/hide window).
+
+        Скрывает окно приложения из вида, оставляя его запущенным в фоне. Окно
+        остаётся доступно через панель задач или Alt+Tab.
 
         Args:
             handle: Дескриптор окна
 
         Returns:
-            Результат выполнения
+            {"success": true, "data": {"action": "minimize_window"}}
+
+        Примеры:
+            - ui_minimize_window(handle=notepad) - свернуть Блокнот
+            - Часто используется для быстрого доступа к рабочему столу
         """
         check_admin()
 
@@ -328,13 +412,20 @@ def register_interaction_tools(mcp: FastMCP):
 
     @mcp.tool()
     def ui_maximize_window(handle: int) -> dict:
-        """Развернуть окно на весь экран.
+        """Развернуть окно на весь экран (maximize/fullscreen mode).
+
+        Увеличивает окно на максимальный размер доступного экрана. Окно займёт
+        всё пространство рабочей области (исключая панель задач).
 
         Args:
             handle: Дескриптор окна
 
         Returns:
-            Результат выполнения
+            {"success": true, "data": {"action": "maximize_window"}}
+
+        Примеры:
+            - ui_maximize_window(handle=word_doc) - развернуть Word на весь экран
+            - Противоположность ui_minimize_window
         """
         check_admin()
 
@@ -383,13 +474,20 @@ def register_interaction_tools(mcp: FastMCP):
 
     @mcp.tool()
     def ui_restore_window(handle: int) -> dict:
-        """Восстановить окно из свёрнутого или развёрнутого состояния.
+        """Восстановить окно к нормальному размеру (из свёрнутого или развёрнутого состояния).
+
+        Возвращает окно из minimize или maximize в нормальное состояние - окно
+        займёт средний размер и позицию.
 
         Args:
             handle: Дескриптор окна
 
         Returns:
-            Результат выполнения
+            {"success": true, "data": {"action": "restore_window"}}
+
+        Примеры:
+            - ui_restore_window(handle=window) - вернуть обычный размер
+            - Используется обычно после ui_maximize_window или ui_minimize_window
         """
         check_admin()
 
