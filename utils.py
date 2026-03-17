@@ -8,13 +8,39 @@ import pyautogui
 
 async def get_all_tools():
     """Возвращает список инструментов MCP (используется в main)."""
+    # Путь к локальной копии mcp-server-browser-use в рабочей папке проекта
+    browser_use_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "mcp-browser-use"))
+
+    # Попробуем взять имя модели из переменных окружения, иначе из config.MODEL_NAMES
+    try:
+        from config import MODEL_NAMES
+
+        default_model = MODEL_NAMES[0]
+    except Exception:
+        default_model = os.getenv("MODEL_NAME", "qwen2.5vl:3b")
+
+    MODEL_NAME = os.getenv("MCP_MODEL_NAME", default_model)
+
     mcp_config = {
         "pc_modules": {
             "command": "python",
             "args": ["launch_mcp.py"],
             "transport": "stdio",
         },
+        "browser-use": {
+            "command": "uv",
+            "args": ["--directory", browser_use_path, "run", "mcp-server-browser-use"],
+            "env": {
+                "MCP_MODEL_PROVIDER": "ollama",
+                "OLLAMA_ENDPOINT": "http://localhost:11434",
+                "MCP_MODEL_NAME": MODEL_NAME,
+                "BROWSER_HEADLESS": "false",
+                "BROWSER_DISABLE_SECURITY": "false",
+                "MCP_USE_VISION": "false",
+            },
+        },
     }
+
     mcp_client = MultiServerMCPClient(mcp_config)
     return await mcp_client.get_tools()
 

@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL_NAMES = ["gpt-oss:120b-cloud","qwen3.5:4b", "qwen2.5vl:3b"]
+MODEL_NAMES = ["qwen3.5:397b-cloud","glm-5:cloud", "gpt-oss:120b-cloud","qwen3.5:4b", "qwen2.5vl:3b"]
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
