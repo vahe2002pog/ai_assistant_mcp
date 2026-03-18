@@ -159,7 +159,7 @@ def register_discovery_tools(mcp: FastMCP):
                     window_info = control_to_info(child).model_dump()
                     windows.append(window_info)
                 except Exception as e:
-                    logger.debug(f"Error processing window: {e}")
+                    logger.debug(f"Ошибка обработки окна: {e}")
                     continue
             
             return {

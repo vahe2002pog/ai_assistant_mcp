@@ -107,7 +107,7 @@ def register_query_tools(mcp: FastMCP):
                     ["Дескриптор может быть устаревшим, переищите контрол"],
                 )
 
-            # Try ValuePattern first
+            # Сначала пробуем ValuePattern
             try:
                 pattern = control.GetValuePattern()
                 if pattern:
@@ -115,7 +115,7 @@ def register_query_tools(mcp: FastMCP):
             except Exception:
                 pass
 
-            # Try TextPattern
+            # Пробуем TextPattern
             try:
                 pattern = control.GetTextPattern()
                 if pattern:
@@ -123,7 +123,7 @@ def register_query_tools(mcp: FastMCP):
             except Exception:
                 pass
 
-            # Try LegacyIAccessiblePattern
+            # Пробуем LegacyIAccessiblePattern
             try:
                 pattern = control.GetLegacyIAccessiblePattern()
                 if pattern:
@@ -131,7 +131,7 @@ def register_query_tools(mcp: FastMCP):
             except Exception:
                 pass
 
-            # Fallback to Name property
+            # Запасной вариант — свойство Name
             return {"success": True, "data": {"text": control.Name or ""}}
 
         except Exception as e:
@@ -209,7 +209,7 @@ def register_query_tools(mcp: FastMCP):
                     ["Дескриптор может быть устаревшим, переищите контрол"],
                 )
 
-            # Generate default path
+            # Генерируем путь по умолчанию
             if not savePath:
                 os.makedirs(config.screenshot_dir, exist_ok=True)
                 timestamp = time.strftime("%Y%m%d_%H%M%S")

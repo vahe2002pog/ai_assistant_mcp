@@ -30,6 +30,7 @@ import mcp_modules.tools_files
 import mcp_modules.tools_web
 import mcp_modules.tools_weather
 import mcp_modules.tools_media
+import mcp_modules.tools_browser  # noqa: F401 — side-effect import (регистрирует browser tools в mcp)
 # Подключаем локально скопированные инструменты UIAutomation (если есть)
 # try:
 from mcp_uiautomation.tools import (

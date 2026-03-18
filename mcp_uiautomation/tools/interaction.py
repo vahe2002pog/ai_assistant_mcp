@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Инициализируем COM при загрузке модуля (требуется для UIAutomation)
 init_com()
 
-# Store pending confirmations for dangerous operations
+# Хранилище ожидающих подтверждений для опасных операций
 _pending_confirms = {}
 
 
@@ -92,7 +92,7 @@ def register_interaction_tools(mcp: FastMCP):
             double = False
 
         try:
-            # Click at absolute coordinates (handle=0 или явно заданы x/y)
+            # Клик по абсолютным координатам (handle=0 или явно заданы x/y)
             if (handle is None or handle == 0) and x is not None and y is not None:
                 if button == "right":
                     auto.RightClick(x, y)
@@ -104,7 +104,7 @@ def register_interaction_tools(mcp: FastMCP):
                     auto.Click(x, y)
                 return {"success": True, "data": {"action": "click", "x": x, "y": y, "method": "coordinates"}}
 
-            # Click on control (only if handle is not 0)
+            # Клик по контролу (только если handle не равен 0)
             if handle == 0:
                 return format_error(
                     "INVALID_HANDLE",
@@ -119,7 +119,7 @@ def register_interaction_tools(mcp: FastMCP):
                     f"Некорректный дескриптор контрола: {handle}",
                 )
 
-            # Determine click method
+            # Определяем метод клика
             if button == "right":
                 control.RightClick(x, y)
             elif button == "middle":
@@ -263,17 +263,17 @@ def register_interaction_tools(mcp: FastMCP):
                     f"Некорректный дескриптор окна: {handle}",
                 )
 
-            # Close the window
+            # Закрываем окно
             pattern = control.GetWindowPattern()
             if pattern:
                 try:
                     pattern.Close()
                 except Exception:
-                    # Fallback to Alt+F4
+                    # Запасной вариант через Alt+F4
                     control.SetFocus()
                     auto.SendKeys("{Alt}{F4}")
             else:
-                # Fallback to Alt+F4
+                # Запасной вариант через Alt+F4
                 control.SetFocus()
                 auto.SendKeys("{Alt}{F4}")
 

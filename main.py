@@ -1,56 +1,74 @@
 import asyncio
 import os
-from typing import List, Optional, Dict, Any, Literal
-from models import AssistantResponse
-from loop import run_loop
-from langchain_core.messages import HumanMessage
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_ollama import ChatOllama
-from utils import get_all_tools, set_system_volume
+from models import AssistantResponse
+from loop import run_loop
 from agents import create_graph
 from config import MODEL_NAMES, system_prompt, formatter_prompt
+from utils import build_mcp_config, set_system_volume
 
 MODEL_NAME = MODEL_NAMES[0]
 
 os.environ["NO_PROXY"] = "localhost,127.0.0.1,::1"
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
-# Состояние графа
 async def main():
     print("Инициализация ассистента...")
-    
-    tools = await get_all_tools()
-    print(f"Подключено инструментов: {len(tools)}")
-    
-    executor_llm = ChatOllama(
-        model=MODEL_NAME,
-        system=system_prompt,
-        temperature=0.1,
-        top_p=0.8,
-        repeat_penalty=1.1,
-        stop=["\n", "User:", "Ассистент:"]
-    )
 
-    formatter_llm = ChatOllama(
-        model=MODEL_NAME,
-        temperature=0,
-        format=AssistantResponse.model_json_schema(),
-    )
-    
-    memory = MemorySaver()
+    config = build_mcp_config()
+    client = MultiServerMCPClient(config)
 
-    # создаём граф выполнения (в agents.create_graph)
-    graph, config = create_graph(
-        executor_llm,
-        formatter_llm,
-        tools,
-        memory,
-        AssistantResponse.model_json_schema(),
-        formatter_prompt,
-    )
+    # Открываем сессии для каждого сервера вручную
+    sessions = {}
+    exit_stack = asyncio.Queue()  # просто для хранения cm
 
-    # Передаём цикл обработки в модуль console
-    await run_loop(graph, config)
+    cms = []
+    for server_name in config.keys():
+        cm = client.session(server_name)
+        session = await cm.__aenter__()
+        sessions[server_name] = (cm, session)
+        cms.append(cm)
+
+    try:
+        tools = await client.get_tools()
+        print(f"Подключено инструментов: {len(tools)}")
+
+        # Показать названия инструментов по серверам
+        for tool in tools:
+            print(f"  [{tool.name}]")
+
+        executor_llm = ChatOllama(
+            model=MODEL_NAME,
+            system=system_prompt,
+            temperature=0.1,
+            top_p=0.8,
+            repeat_penalty=1.1,
+            stop=["\n", "User:", "Ассистент:"]
+        )
+        formatter_llm = ChatOllama(
+            model=MODEL_NAME,
+            temperature=0,
+            format=AssistantResponse.model_json_schema(),
+        )
+
+        memory = MemorySaver()
+        graph, graph_config = create_graph(
+            executor_llm,
+            formatter_llm,
+            tools,
+            memory,
+            AssistantResponse.model_json_schema(),
+            formatter_prompt,
+        )
+
+        await run_loop(graph, graph_config)
+
+    finally:
+        # Закрываем все сессии при выходе
+        for cm, session in sessions.values():
+            await cm.__aexit__(None, None, None)
 
 if __name__ == "__main__":
     asyncio.run(main())
