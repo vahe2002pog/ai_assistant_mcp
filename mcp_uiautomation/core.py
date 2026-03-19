@@ -11,7 +11,7 @@ import logging
 import uuid
 from typing import Optional, Any, Dict, List
 
-import uiautomation as auto
+import uiautomation as auto  # stdout уже подавлен в __init__.py пакета
 
 from .config import config
 from .models import ControlInfo, ControlSelector, ConfirmationRequest

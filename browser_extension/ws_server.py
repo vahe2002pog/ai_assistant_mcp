@@ -17,15 +17,8 @@ _loop: asyncio.AbstractEventLoop = None
 _lock = threading.Lock()
 _ready = threading.Event()   # сигнал что сервер реально слушает
 
-_LOG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp_bridge.log")
-
 def _log(msg):
-    try:
-        with open(_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
-            f.flush()
-    except Exception:
-        pass
+    print(msg, flush=True, file=sys.stderr)
 
 
 async def _handler(websocket):

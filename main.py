@@ -4,13 +4,11 @@ import subprocess
 import sys
 import time
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.checkpoint.memory import MemorySaver
 from langchain_ollama import ChatOllama
-from models import AssistantResponse
 from loop import run_loop
-from agents import create_graph
-from config import MODEL_NAMES, FORMATTER_MODEL, system_prompt, formatter_prompt
-from utils import build_mcp_config, set_system_volume
+from subagents import create_main_agent
+from config import MODEL_NAMES
+from utils import build_mcp_config
 
 MODEL_NAME = MODEL_NAMES[0]
 
@@ -18,7 +16,6 @@ os.environ["NO_PROXY"] = "localhost,127.0.0.1,::1"
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
 def start_ws_bridge():
-    """Запускает ws_bridge.py как отдельный постоянный процесс."""
     import urllib.request
     try:
         urllib.request.urlopen("http://127.0.0.1:9010/status", timeout=1)
@@ -34,17 +31,21 @@ def start_ws_bridge():
     return proc
 
 
+def scan_apps():
+    from app_scanner import scan_and_save
+    count = scan_and_save()
+    print(f"Найдено приложений: {count}")
+
+
 async def main():
     start_ws_bridge()
     print("Инициализация ассистента...")
+    await asyncio.to_thread(scan_apps)
 
     config = build_mcp_config()
     client = MultiServerMCPClient(config)
 
-    # Открываем сессии для каждого сервера вручную
     sessions = {}
-    exit_stack = asyncio.Queue()  # просто для хранения cm
-
     cms = []
     for server_name in config.keys():
         cm = client.session(server_name)
@@ -53,36 +54,21 @@ async def main():
         cms.append(cm)
 
     try:
-        tools = await client.get_tools()
-        executor_llm = ChatOllama(
+        all_tools = await client.get_tools()
+
+        llm = ChatOllama(
             model=MODEL_NAME,
-            system=system_prompt,
             temperature=0.1,
             top_p=0.8,
             repeat_penalty=1.1,
-            stop=["\n", "User:", "Ассистент:"]
-        )
-        formatter_llm = ChatOllama(
-            model=FORMATTER_MODEL,
-            temperature=0,
-            num_predict=512,
-            format=AssistantResponse.model_json_schema(),
         )
 
-        memory = MemorySaver()
-        graph, graph_config = create_graph(
-            executor_llm,
-            formatter_llm,
-            tools,
-            memory,
-            AssistantResponse.model_json_schema(),
-            formatter_prompt,
-        )
+        graph = create_main_agent(all_tools, llm)
+        graph_config = {"configurable": {"thread_id": "pc_agent_session"}}
 
         await run_loop(graph, graph_config)
 
     finally:
-        # Закрываем все сессии при выходе
         for cm, session in sessions.values():
             await cm.__aexit__(None, None, None)
 

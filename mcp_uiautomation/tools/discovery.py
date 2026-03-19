@@ -477,3 +477,158 @@ def register_discovery_tools(mcp: FastMCP):
         except Exception as e:
             logger.exception("ui_control_from_point failed")
             return format_error("INTERNAL_ERROR", str(e))
+
+    @mcp.tool()
+    def ui_inspect_app(
+        handle: Optional[int] = None,
+        depth: Optional[int] = None,
+        max_elements: Optional[int] = None,
+    ) -> dict:
+        """Показать полную структуру приложения: все кнопки, текст, поля ввода и т.д.
+
+        Рекурсивно обходит дерево UI-элементов и возвращает читаемое дерево
+        с именами, типами и handle каждого элемента. Идеален для понимания
+        структуры интерфейса перед взаимодействием.
+
+        Args:
+            handle: Дескриптор окна или контрола для инспекции.
+                По умолчанию: None (использует активное окно на переднем плане)
+            depth: Глубина обхода дерева элементов.
+                По умолчанию: 6
+                Совет: для сложных приложений (Office, браузер) хватает 4–5
+            max_elements: Максимальное количество элементов в выводе.
+                По умолчанию: 300
+                Увеличь если структура обрезается
+
+        Returns:
+            {
+                "success": true,
+                "data": {
+                    "root": "Имя окна [WindowControl] handle=12345",
+                    "tree": "... текстовое дерево ...",
+                    "total": 87,
+                    "truncated": false
+                }
+            }
+
+        Пример вывода:
+            Word [WindowControl] handle=131234
+            ├─ Лента [PaneControl] handle=131450
+            │   ├─ Главная [TabItemControl] handle=131451
+            │   ├─ Вставка [TabItemControl] handle=131452
+            ├─ Документ [DocumentControl] handle=131600
+            │   ├─ [EditControl] handle=131601
+            └─ Строка состояния [StatusBarControl] handle=131700
+
+        Совет:
+            После получения дерева ищи нужный элемент по имени и используй
+            его handle в ui_click, ui_send_keys, ui_paste_text и т.д.
+            Если handle=0 — Modern UI элемент, используй координаты rect для клика.
+        """
+        check_admin()
+
+        if depth is None:
+            depth = 6
+        if max_elements is None:
+            max_elements = 300
+
+        # Типы контролов, которые полезны агенту (фильтруем мусор)
+        USEFUL_TYPES = {
+            "ButtonControl", "EditControl", "TextControl", "CheckBoxControl",
+            "RadioButtonControl", "ComboBoxControl", "ListControl", "ListItemControl",
+            "MenuControl", "MenuBarControl", "MenuItemControl", "TabControl",
+            "TabItemControl", "TreeControl", "TreeItemControl", "DocumentControl",
+            "PaneControl", "GroupControl", "ToolBarControl", "StatusBarControl",
+            "WindowControl", "TitleBarControl", "HyperlinkControl", "ImageControl",
+            "ScrollBarControl", "SliderControl", "SpinnerControl", "SplitButtonControl",
+            "DataGridControl", "DataItemControl", "HeaderControl", "HeaderItemControl",
+        }
+
+        try:
+            if handle is not None:
+                root = get_control_by_handle(handle)
+                if not root:
+                    return format_error(
+                        "CONTROL_NOT_FOUND",
+                        f"Некорректный дескриптор: {handle}",
+                    )
+            else:
+                root = auto.GetForegroundControl()
+                if not root:
+                    return format_error("NO_FOREGROUND_WINDOW", "Не удалось получить активное окно")
+
+            lines = []
+            total = [0]
+            truncated = [False]
+
+            def walk(ctrl, current_depth: int, prefix: str, is_last: bool):
+                if truncated[0]:
+                    return
+                if total[0] >= max_elements:
+                    truncated[0] = True
+                    lines.append(f"{prefix}... (вывод обрезан, увеличь max_elements)")
+                    return
+
+                try:
+                    ctrl_type = ctrl.ControlTypeName or "UnknownControl"
+                    name = (ctrl.Name or "").strip()
+                    h = ctrl.NativeWindowHandle
+
+                    # Пропускаем неинтересные типы без имени
+                    if ctrl_type not in USEFUL_TYPES and not name:
+                        pass
+                    else:
+                        connector = "└─" if is_last else "├─"
+                        label = f"{name} " if name else ""
+                        handle_str = f"handle={h}" if h else "handle=0 (Modern UI)"
+
+                        # Для текстовых элементов показываем содержимое
+                        value_str = ""
+                        if ctrl_type in ("TextControl", "EditControl"):
+                            try:
+                                val = ctrl.GetValuePattern().Value if ctrl.GetValuePattern() else ""
+                                if val:
+                                    value_str = f' = "{val[:60]}"'
+                            except Exception:
+                                pass
+
+                        lines.append(
+                            f"{prefix}{connector} {label}[{ctrl_type}] {handle_str}{value_str}"
+                        )
+                        total[0] += 1
+
+                except Exception:
+                    return
+
+                if current_depth >= depth:
+                    return
+
+                child_prefix = prefix + ("   " if is_last else "│  ")
+                try:
+                    children = ctrl.GetChildren()
+                except Exception:
+                    return
+
+                for i, child in enumerate(children):
+                    walk(child, current_depth + 1, child_prefix, i == len(children) - 1)
+
+            root_name = (root.Name or "").strip() or "(без имени)"
+            root_type = root.ControlTypeName or "UnknownControl"
+            root_handle = root.NativeWindowHandle
+            root_label = f"{root_name} [{root_type}] handle={root_handle}"
+
+            walk(root, 1, "", True)
+
+            return {
+                "success": True,
+                "data": {
+                    "root": root_label,
+                    "tree": "\n".join(lines),
+                    "total": total[0],
+                    "truncated": truncated[0],
+                },
+            }
+
+        except Exception as e:
+            logger.exception("ui_inspect_app failed")
+            return format_error("INTERNAL_ERROR", str(e))

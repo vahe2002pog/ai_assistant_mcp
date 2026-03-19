@@ -8,17 +8,6 @@ from typing import Dict, Optional
 MAX_CACHE = 200
 BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, "cache.db")
-LOG_PATH = os.path.join(BASE_DIR, "cache_debug.log")
-
-
-def _log(msg: str) -> None:
-    try:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        pid = os.getpid()
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{ts} PID:{pid} {msg}\n")
-    except Exception:
-        pass
 
 
 def _get_conn():
@@ -47,6 +36,28 @@ def _init_db() -> None:
         # Уникальный индекс по значению — предотвращает дублирование
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_value ON cache(value)")
         
+        # Таблица установленных приложений
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS apps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                FOREIGN KEY (app_id) REFERENCES apps(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alias ON app_aliases(alias)")
+
         # Таблица истории действий (для функции отмены)
         conn.execute(
             """
@@ -73,7 +84,6 @@ def _init_db() -> None:
 
 # Инициализация при импорте
 _init_db()
-_log("INIT sqlite cache ready")
 
 
 def cache_put(value: str) -> int:
@@ -87,7 +97,7 @@ def cache_put(value: str) -> int:
         if row:
             key = row[0]
             conn.execute("UPDATE cache SET created_ts=? WHERE id=?", (ts, key))
-            _log(f"EXISTS key={key} value={value}")
+
         else:
             cur = conn.execute("INSERT INTO cache (value, created_ts) VALUES (?, ?)", (value, ts))
             key = cur.lastrowid
@@ -100,7 +110,7 @@ def cache_put(value: str) -> int:
                 "DELETE FROM cache WHERE id IN (SELECT id FROM cache ORDER BY id ASC LIMIT ?)",
                 (to_remove,)
             )
-        _log(f"PUT key={key} value={value} total={total}")
+
         return key
     finally:
         conn.close()
@@ -129,7 +139,7 @@ def cache_list() -> Dict[int, str]:
                 result[k] = v
             else:
                 result[k] = str(v)
-        _log(f"LIST keys={list(result.keys())}")
+
         return result
     finally:
         conn.close()
@@ -140,7 +150,7 @@ def cache_clear() -> None:
     conn = _get_conn()
     try:
         conn.execute("DELETE FROM cache")
-        _log("CLEAR cache cleared")
+
     finally:
         conn.close()
 
@@ -156,7 +166,7 @@ def history_push(action_type: str, payload: dict) -> None:
             "INSERT INTO action_history (action_type, payload, created_ts) VALUES (?, ?, ?)",
             (action_type, json.dumps(payload), ts)
         )
-        _log(f"HISTORY PUSH: {action_type}")
+
     finally:
         conn.close()
 
@@ -181,7 +191,143 @@ def history_remove_last() -> None:
     conn = _get_conn()
     try:
         conn.execute("DELETE FROM action_history WHERE id = (SELECT MAX(id) FROM action_history)")
-        _log("HISTORY REMOVE LAST")
+
+    finally:
+        conn.close()
+
+
+# === ПРИЛОЖЕНИЯ ===
+
+def apps_clear() -> None:
+    """Очищает таблицы приложений и алиасов."""
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM app_aliases")
+        conn.execute("DELETE FROM apps")
+    finally:
+        conn.close()
+
+
+def apps_put(name: str, path: str) -> None:
+    """Добавляет приложение (игнорирует дубликаты по path)."""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO apps (name, path) VALUES (?, ?)",
+            (name, path),
+        )
+    finally:
+        conn.close()
+
+
+def apps_put_many(items: list) -> None:
+    """Массовая вставка [(name, path), ...]."""
+    conn = _get_conn()
+    try:
+        conn.executemany(
+            "INSERT OR IGNORE INTO apps (name, path) VALUES (?, ?)",
+            items,
+        )
+    finally:
+        conn.close()
+
+
+def apps_add_aliases(path: str, aliases: list) -> None:
+    """Добавляет алиасы для приложения по его path."""
+    conn = _get_conn()
+    try:
+        cur = conn.execute("SELECT id FROM apps WHERE path=?", (path,))
+        row = cur.fetchone()
+        if not row:
+            return
+        app_id = row[0]
+        conn.executemany(
+            "INSERT OR IGNORE INTO app_aliases (app_id, alias) VALUES (?, ?)",
+            [(app_id, a.lower()) for a in aliases if a],
+        )
+    finally:
+        conn.close()
+
+
+def apps_add_aliases_bulk(items: list) -> None:
+    """Массовая вставка алиасов. items = [(path, [alias1, alias2, ...]), ...]."""
+    conn = _get_conn()
+    try:
+        # Собираем все path -> id
+        cur = conn.execute("SELECT id, path FROM apps")
+        path_to_id = {row[1]: row[0] for row in cur.fetchall()}
+
+        rows = []
+        for path, aliases in items:
+            app_id = path_to_id.get(path)
+            if app_id:
+                for a in aliases:
+                    if a:
+                        rows.append((app_id, a.lower()))
+
+        if rows:
+            conn.executemany(
+                "INSERT OR IGNORE INTO app_aliases (app_id, alias) VALUES (?, ?)",
+                rows,
+            )
+    finally:
+        conn.close()
+
+
+def apps_search(query: str) -> list:
+    """Ищет приложения по имени или алиасу. Возвращает [(name, path), ...]."""
+    conn = _get_conn()
+    try:
+        q = query.lower()
+        cur = conn.execute(
+            """
+            SELECT DISTINCT a.name, a.path FROM apps a
+            LEFT JOIN app_aliases al ON al.app_id = a.id
+            WHERE a.name LIKE ? OR al.alias LIKE ?
+            ORDER BY
+                CASE
+                    WHEN LOWER(a.name) = ? THEN 0
+                    WHEN al.alias = ? THEN 1
+                    WHEN LOWER(a.name) LIKE ? THEN 2
+                    ELSE 3
+                END
+            LIMIT 10
+            """,
+            (f"%{q}%", f"%{q}%", q, q, f"{q}%"),
+        )
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def apps_list_all() -> list:
+    """Возвращает все приложения [(name, path), ...]."""
+    conn = _get_conn()
+    try:
+        cur = conn.execute("SELECT name, path FROM apps ORDER BY name")
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def apps_get_paths_with_aliases() -> set:
+    """Возвращает множество path приложений, у которых уже есть алиасы."""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT DISTINCT a.path FROM apps a INNER JOIN app_aliases al ON al.app_id = a.id"
+        )
+        return {row[0] for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def apps_count() -> int:
+    """Количество приложений в базе."""
+    conn = _get_conn()
+    try:
+        cur = conn.execute("SELECT COUNT(1) FROM apps")
+        return cur.fetchone()[0]
     finally:
         conn.close()
 
