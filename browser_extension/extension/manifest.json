@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "AI Assistant MCP Bridge",
+  "version": "1.0",
+  "description": "Bridges AI assistant MCP tools with the browser",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AI Assistant Bridge"
+  }
+}

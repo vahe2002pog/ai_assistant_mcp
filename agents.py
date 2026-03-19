@@ -1,7 +1,10 @@
+import asyncio
 from typing import Any, TypedDict, Annotated, List
 from langgraph.graph import StateGraph, START, END, add_messages
 from langgraph.prebuilt import ToolNode
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
+
+LLM_TIMEOUT = 60.0  # таймаут только на вызов LLM
 
 
 class State(TypedDict):
@@ -14,8 +17,15 @@ def create_graph(executor_llm, formatter_llm, tools, memory, formatter_schema, f
     Возвращает скомпилированный граф и конфиг для запуска.
     """
     # executor node — использует bound executor_llm
-    def executor_node(state: dict):
-        return {"messages": [executor_llm.bind_tools(tools).invoke(state["messages"]) ]}
+    async def executor_node(state: dict):
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(executor_llm.bind_tools(tools).invoke, state["messages"]),
+                timeout=LLM_TIMEOUT,
+            )
+            return {"messages": [result]}
+        except asyncio.TimeoutError:
+            return {"messages": [AIMessage(content="Ошибка: LLM не ответил вовремя.")]}
 
     def formatter_node(state: dict):
         user_message = None
@@ -42,7 +52,7 @@ def create_graph(executor_llm, formatter_llm, tools, memory, formatter_schema, f
 
     workflow = StateGraph(State)
     workflow.add_node("executor", executor_node)
-    workflow.add_node("tools", ToolNode(tools))
+    workflow.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     workflow.add_node("formatter", formatter_node)
     workflow.add_edge(START, "executor")
     workflow.add_conditional_edges(

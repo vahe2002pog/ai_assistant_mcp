@@ -7,13 +7,25 @@ import pyautogui
 from contextlib import asynccontextmanager
 
 def build_mcp_config() -> dict:
-    return {
+    config = {
         "pc_modules": {
             "command": "python",
             "args": ["launch_mcp.py"],
             "transport": "stdio",
         },
     }
+
+    # Browser MCP — расширение Chrome, не требует dev mode
+    # Установить: npm install -g @browsermcp/mcp + расширение из Chrome Web Store
+    if os.path.exists(os.path.join(os.environ.get("APPDATA", ""), "npm", "browsermcp.cmd")) or \
+       os.path.exists(r"C:\Program Files\nodejs\node_modules\@browsermcp\mcp"):
+        config["browser"] = {
+            "command": "npx",
+            "args": ["@browsermcp/mcp@latest"],
+            "transport": "stdio",
+        }
+
+    return config
 
 
 @asynccontextmanager

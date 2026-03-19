@@ -1,12 +1,15 @@
 import asyncio
 import os
+import subprocess
+import sys
+import time
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_ollama import ChatOllama
 from models import AssistantResponse
 from loop import run_loop
 from agents import create_graph
-from config import MODEL_NAMES, system_prompt, formatter_prompt
+from config import MODEL_NAMES, FORMATTER_MODEL, system_prompt, formatter_prompt
 from utils import build_mcp_config, set_system_volume
 
 MODEL_NAME = MODEL_NAMES[0]
@@ -14,7 +17,25 @@ MODEL_NAME = MODEL_NAMES[0]
 os.environ["NO_PROXY"] = "localhost,127.0.0.1,::1"
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
+def start_ws_bridge():
+    """Запускает ws_bridge.py как отдельный постоянный процесс."""
+    import urllib.request
+    try:
+        urllib.request.urlopen("http://127.0.0.1:9010/status", timeout=1)
+        return None
+    except Exception:
+        pass
+    proc = subprocess.Popen(
+        [sys.executable, "browser_extension/ws_bridge.py"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(1.5)
+    return proc
+
+
 async def main():
+    start_ws_bridge()
     print("Инициализация ассистента...")
 
     config = build_mcp_config()
@@ -33,12 +54,6 @@ async def main():
 
     try:
         tools = await client.get_tools()
-        print(f"Подключено инструментов: {len(tools)}")
-
-        # Показать названия инструментов по серверам
-        for tool in tools:
-            print(f"  [{tool.name}]")
-
         executor_llm = ChatOllama(
             model=MODEL_NAME,
             system=system_prompt,
@@ -48,8 +63,9 @@ async def main():
             stop=["\n", "User:", "Ассистент:"]
         )
         formatter_llm = ChatOllama(
-            model=MODEL_NAME,
+            model=FORMATTER_MODEL,
             temperature=0,
+            num_predict=512,
             format=AssistantResponse.model_json_schema(),
         )
 
