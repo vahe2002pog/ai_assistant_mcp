@@ -4,3 +4,5 @@ cache.db
 mcp_modules/UIAutomationMCP/*
 TOOLS_DOCUMENTATION.md
 @AutomationLog.txt
+.venv/*
+.env
