@@ -2,67 +2,10 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-
-MODEL_NAMES = ["gpt-oss:120b-cloud","qwen3.5:4b", "qwen2.5vl:3b", "qwen3.5:397b-cloud","glm-5:cloud"]
-FORMATTER_MODEL = "gpt-oss:120b-cloud"
-
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+LLAMA_BASE_URL = os.getenv("LLAMA_BASE_URL", "http://localhost:8080")
 
-formatter_prompt = """
-Ты преобразуешь ответ ассистента в структурированный JSON.
-
-Верни JSON строго по схеме AssistantResponse.
-
-Структура ответа:
-
-voice — короткая фраза для озвучивания (1 предложение, до 10 слов), 
-которая содержит основной ответ на запрос пользователя.
-
-screen.blocks — массив блоков интерфейса, оставь пустым, если нет явных данных для отображения.
-
-Каждый блок имеет поле type.
-
-Типы блоков:
-
-text
-используется для длинного текста
-поле: text
-
-list
-используется для списков
-поле: items (массив строк)
-
-table
-используется для таблиц
-поле: rows (массив объектов)
-
-links
-используется для URL
-поле: links (массив строк)
-
-files
-используется для путей к файлам
-поле: file_paths (массив строк)
-
-Дополнительно можно использовать:
-title — короткий заголовок блока.
-
-Правила:
-
-• каждый логический элемент делай отдельным блоком
-• разные списки должны быть разными блоками
-• разные таблицы должны быть разными блоками
-• сохраняй порядок элементов как в исходном ответе
-• если сначала таблица, потом список — blocks должны идти в том же порядке
-• если данных нет — screen = null
-• ответ должен быть только JSON
-• удаляй из ответа все упоминания о кэше и ID, они нужны только для инструментов
-
-Запрос пользователя и ответ ассистента могут содержать текст, списки или таблицы. Разбей их на блоки.
-"""
-# Словарь для поиска по человеческим названиям (GUID константы)
 KNOWN_FOLDERS = {
-    # Английские названия
     "desktop": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
     "documents": "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
     "pictures": "{33E28130-4E1E-4676-835A-98395C3BC3BB}",
@@ -71,8 +14,6 @@ KNOWN_FOLDERS = {
     "appdata": "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}",
     "localappdata": "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}",
     "downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
-    
-    # Русские названия
     "рабочий стол": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
     "документы": "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
     "изображения": "{33E28130-4E1E-4676-835A-98395C3BC3BB}",
@@ -83,16 +24,17 @@ KNOWN_FOLDERS = {
     "загрузки": "{374DE290-123F-4565-9164-39C4925E467B}",
 }
 
-# Fallback: переменные окружения
 env_map = {
     "desktop": ("USERPROFILE", "Desktop"),
     "documents": ("USERPROFILE", "Documents"),
     "pictures": ("USERPROFILE", "Pictures"),
     "music": ("USERPROFILE", "Music"),
     "videos": ("USERPROFILE", "Videos"),
+    "downloads": ("USERPROFILE", "Downloads"),
     "рабочий стол": ("USERPROFILE", "Desktop"),
     "документы": ("USERPROFILE", "Documents"),
     "изображения": ("USERPROFILE", "Pictures"),
     "музыка": ("USERPROFILE", "Music"),
     "видео": ("USERPROFILE", "Videos"),
+    "загрузки": ("USERPROFILE", "Downloads"),
 }

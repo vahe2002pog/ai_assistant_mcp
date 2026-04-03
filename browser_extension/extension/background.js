@@ -85,6 +85,13 @@ async function handleCommand(msg) {
       };
     }
 
+    case "get_all_tabs": {
+      const allTabs = await chrome.tabs.query({});
+      return {
+        tabs: allTabs.map(t => ({ id: t.id, windowId: t.windowId, url: t.url, title: t.title, active: t.active })),
+      };
+    }
+
     case "navigate": {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       await chrome.tabs.update(tab.id, { url: params.url });

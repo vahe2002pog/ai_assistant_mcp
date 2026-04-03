@@ -6,3 +6,9 @@ TOOLS_DOCUMENTATION.md
 @AutomationLog.txt
 .venv/*
 .env
+llm_aliases_cache.json
+vectordb/
+ui_agent_debug.log
+llama-server/*
+models/*
+llm_aliases_cache.json

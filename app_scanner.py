@@ -9,8 +9,6 @@ import winreg
 import re
 import json
 from database import apps_clear, apps_put_many, apps_count, apps_add_aliases_bulk
-_ALIAS_MODEL = "gpt-oss:120b-cloud"
-
 BASE_DIR = os.path.dirname(__file__)
 _LLM_CACHE_PATH = os.path.join(BASE_DIR, "llm_aliases_cache.json")
 
@@ -34,17 +32,17 @@ def _save_llm_cache(cache: dict) -> None:
 
 # Папки для сканирования ярлыков (.lnk)
 _SHORTCUT_DIRS = [
-    os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
-    os.path.join(os.environ.get("PROGRAMDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
+    os.path.join(os.environ.get("APPDATA", ""), r"MicrosMicrosoft\Windows\Start Menu\Programs"),
+    os.path.join(os.environ.get("PROGRAMDATA", ""), r"MicrosMicrosoft\Windows\Start Menu\Programs"),
     os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
     os.path.join(os.environ.get("PUBLIC", ""), "Desktop"),
 ]
 
 # Реестр: ключи с установленными программами
 _REG_KEYS = [
-    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
-    (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_LOCAL_MACHINE, r"SMicrosoftWARE\MicrosMicrosoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_LOCAL_MACHINE, r"SMicrosoftWARE\WOW6432Node\MicrosMicrosoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_CURRENT_USER, r"SMicrosoftWARE\MicrosMicrosoft\Windows\CurrentVersion\Uninstall"),
 ]
 
 # Папки с .exe для прямого сканирования
@@ -292,13 +290,15 @@ _LLM_BATCH_SIZE = 15
 
 
 def _generate_aliases_llm(apps: list) -> dict:
-    """Генерирует алиасы через LLM для списка [(name, path), ...].
+    """Генерирует алиасы через локальную LLM для списка [(name, path), ...].
     Возвращает {path: [aliases]}."""
-    from langchain_ollama import ChatOllama
+    import openai
 
-    os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,::1")
-    os.environ.setdefault("no_proxy", "localhost,127.0.0.1,::1")
-    llm = ChatOllama(model=_ALIAS_MODEL, temperature=0, num_predict=4096)
+    api_base  = os.environ.get("API_BASE",  "http://localhost:8000/v1")
+    api_key   = os.environ.get("API_KEY",   "llama")
+    api_model = os.environ.get("API_MODEL", "local")
+
+    client = openai.OpenAI(base_url=api_base, api_key=api_key)
     result = {}
 
     for i in range(0, len(apps), _LLM_BATCH_SIZE):
@@ -307,38 +307,64 @@ def _generate_aliases_llm(apps: list) -> dict:
             {"name": name, "exe": os.path.basename(path)}
             for name, path in batch
         ]
-
-        prompt = f"{_LLM_ALIAS_PROMPT}\n\nВход: {json.dumps(items, ensure_ascii=False)}"
+        user_msg = f"Вход: {json.dumps(items, ensure_ascii=False)}"
 
         try:
-            response = llm.invoke(prompt)
-            content = response.content.strip()
-            # Убираем <think>...</think> блоки (qwen3.5 thinking mode)
-            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
-            # Убираем markdown-обёртку если есть
+            response = client.chat.completions.create(
+                model=api_model,
+                messages=[
+                    {"role": "system", "content": _LLM_ALIAS_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+                temperature=0,
+                max_tokens=2048,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+            raw = (response.choices[0].message.content or "").strip()
+
+            # Убираем <think>...</think> (режим размышлений)
+            content = re.sub(r'<think>[\s\S]*?</think>', '', raw, flags=re.DOTALL).strip()
+
+            if not content:
+                # Модель вернула только thinking или пустой ответ — пропускаем батч
+                continue
+
+            # Убираем markdown-обёртку
             if content.startswith("```"):
                 content = re.sub(r'^```\w*\n?', '', content)
-                content = re.sub(r'\n?```$', '', content)
-            # Извлекаем JSON если он в тексте
+                content = re.sub(r'\n?```$', '', content).strip()
+
+            # Извлекаем первый JSON-объект из текста
             json_match = re.search(r'\{[\s\S]*\}', content)
-            if json_match:
-                content = json_match.group()
+            if not json_match:
+                continue
+            content = json_match.group()
 
             aliases_map = json.loads(content)
 
             for name, path in batch:
                 llm_aliases = aliases_map.get(name, [])
                 if isinstance(llm_aliases, list):
-                    result[path] = [a.lower().strip() for a in llm_aliases if isinstance(a, str) and len(a.strip()) >= 2]
-        except Exception as e:
-            print(f"LLM alias generation error (batch {i}): {e}")
+                    result[path] = [
+                        a.lower().strip() for a in llm_aliases
+                        if isinstance(a, str) and len(a.strip()) >= 2
+                    ]
+        except json.JSONDecodeError:
+            pass  # некорректный JSON — просто пропускаем батч
+        except Exception:
+            pass  # сетевые ошибки и пр. — не спамим в консоль
 
     return result
 
 
-def scan_and_save() -> int:
-    """Сканирует все источники и сохраняет в БД. Возвращает количество найденных."""
-    all_apps = {}
+def scan_and_save(llm: bool = True) -> int:
+    """
+    Сканирует все источники и сохраняет в БД.
+    llm=False — только базовые алиасы (быстро).
+    llm=True  — базовые + LLM-алиасы для новых приложений.
+    Возвращает количество найденных приложений.
+    """
+    all_apps: dict = {}
 
     # Приоритет: ярлыки > реестр > exe-папки (ярлыки дают лучшие имена)
     for name, path in _scan_exe_dirs():
@@ -373,31 +399,60 @@ def scan_and_save() -> int:
     if alias_data:
         apps_add_aliases_bulk(alias_data)
 
-    # Восстанавливаем LLM-алиасы из кэша для существующих приложений
+    # Восстанавливаем LLM-алиасы из кэша
     current_paths = {path for _, path in all_apps.values()}
-    cached_data = [(path, aliases) for path, aliases in llm_cache.items()
-                   if path in current_paths and aliases]
+    cached_data = [
+        (path, aliases) for path, aliases in llm_cache.items()
+        if path in current_paths and aliases
+    ]
     if cached_data:
         apps_add_aliases_bulk(cached_data)
 
-    # LLM-алиасы только для НОВЫХ приложений (которых нет в кэше)
+    if llm:
+        _run_llm_for_new(all_apps, llm_cache)
+
+    return len(all_apps)
+
+
+def has_new_apps_for_llm() -> bool:
+    """Возвращает True если есть приложения без LLM-алиасов в кэше."""
+    from database import apps_list_all
+    llm_cache = _load_llm_cache()
+    for _, path in apps_list_all():
+        if os.path.normpath(path) not in llm_cache:
+            return True
+    return False
+
+
+def generate_llm_aliases_for_new() -> None:
+    """Генерирует LLM-алиасы для приложений, которых ещё нет в кэше.
+    Вызывается из фонового потока — не печатает в stdout."""
+    from database import apps_list_all
+    all_apps_list = apps_list_all()
+    all_apps = {os.path.normpath(p).lower(): (n, os.path.normpath(p)) for n, p in all_apps_list}
+    llm_cache = _load_llm_cache()
+    _run_llm_for_new(all_apps, llm_cache, silent=True)
+
+
+def _run_llm_for_new(all_apps: dict, llm_cache: dict, silent: bool = False) -> None:
+    """Генерирует LLM-алиасы только для приложений, которых нет в кэше."""
     new_apps = [
         (name, path) for name, path in all_apps.values()
         if path not in llm_cache
     ]
 
-    if new_apps:
-        print(f"Генерация алиасов через LLM для {len(new_apps)} новых приложений...")
-        llm_aliases = _generate_aliases_llm(new_apps)
-        if llm_aliases:
-            # Сохраняем в кэш и в БД
-            llm_cache.update(llm_aliases)
-            _save_llm_cache(llm_cache)
-            llm_data = [(path, aliases) for path, aliases in llm_aliases.items() if aliases]
-            if llm_data:
-                apps_add_aliases_bulk(llm_data)
-                print(f"LLM сгенерировал алиасы для {len(llm_data)} приложений.")
-    else:
-        print("Все приложения уже имеют LLM-алиасы.")
+    if not new_apps:
+        return
 
-    return len(all_apps)
+    if not silent:
+        print(f"[Алиасы] Генерация LLM для {len(new_apps)} приложений…")
+
+    llm_aliases = _generate_aliases_llm(new_apps)
+    if not llm_aliases:
+        return
+
+    llm_cache.update(llm_aliases)
+    _save_llm_cache(llm_cache)
+    llm_data = [(path, aliases) for path, aliases in llm_aliases.items() if aliases]
+    if llm_data:
+        apps_add_aliases_bulk(llm_data)

@@ -2096,5 +2096,119 @@
     "яндекс телек",
     "яндекс тел",
     "yandex telemost app"
+  ],
+  "C:\\Users\\vahep\\scoop\\apps\\7zip\\current\\7zFM.exe": [
+    "7-zip",
+    "семь зип",
+    "архиватор",
+    "7z",
+    "семь"
+  ],
+  "C:\\Program Files\\FileZilla FTP Client\\filezilla.exe": [
+    "filezilla",
+    "файл зила",
+    "фз",
+    "ftp-клиент",
+    "файлозилла"
+  ],
+  "C:\\Users\\vahep\\AppData\\Local\\Programs\\Python\\Python311\\pythonw.exe": [
+    "idle",
+    "айдл",
+    "python idle",
+    "иде",
+    "python интерпретатор"
+  ],
+  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\146.0.3856.84\\msedge.exe": [
+    "edge",
+    "мсаедж",
+    "микрософт эдж",
+    "браузер",
+    "мэдж",
+    "мэдж браузер"
+  ],
+  "C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2025.4.0\\host\\windows-desktop-win7-x64\\ncu-ui.exe": [
+    "nsight compute",
+    "нсайт компют",
+    "нсайт",
+    "ncu",
+    "профайлер",
+    "ньюсайт"
+  ],
+  "C:\\Program Files\\NVIDIA Corporation\\Nsight Systems 2025.5.2\\host-windows-x64\\nsys-ui.exe": [
+    "nsight systems",
+    "нсайт системс",
+    "нсайт",
+    "nsys",
+    "системс",
+    "профайлер"
+  ],
+  "C:\\Users\\vahep\\AppData\\Local\\Programs\\Python\\Python311\\python.exe": [
+    "python docs",
+    "python модули",
+    "пайтон док",
+    "пайтон хелп",
+    "docs",
+    "документация"
+  ],
+  "C:\\Users\\vahep\\AppData\\Local\\Package Cache\\{1da2e09b-199c-4def-9a99-93a8c1b8ddf2}\\python-3.11.9-amd64.exe": [
+    "python",
+    "пайтон",
+    "3.11",
+    "python 3.11",
+    "пайтон 3.11",
+    "консоль",
+    "терминал"
+  ],
+  "C:\\Users\\vahep\\AppData\\Local\\Programs\\TeamSpeak\\TeamSpeak.exe": [
+    "teamspeak",
+    "тимсписк",
+    "тс",
+    "тс3",
+    "голосовой чат",
+    "тимсписк 3"
+  ],
+  "C:\\Program Files\\Google\\Chrome\\Application\\chrome_proxy.exe": [
+    "youtube music",
+    "ютюб мьюзик",
+    "ютаб мьюзик",
+    "музыка",
+    "видео музыка",
+    "yt music"
+  ],
+  "C:\\Program Files\\FileZilla FTP Client\\fzputtygen.exe": [
+    "fzputtygen",
+    "фзпуттиген",
+    "генератор путти",
+    "путти ген",
+    "фз путти"
+  ],
+  "C:\\Program Files\\FileZilla FTP Client\\fzsftp.exe": [
+    "fzsftp",
+    "фзсфп",
+    "фз ftp",
+    "фз сфп",
+    "фз ftp клиент"
+  ],
+  "C:\\Program Files\\FileZilla FTP Client\\fzstorj.exe": [
+    "fzstorj",
+    "фзстордж",
+    "фз стордж",
+    "фз storj",
+    "фз облако"
+  ],
+  "C:\\Users\\vahep\\AppData\\Local\\Programs\\TeamSpeak\\patcher.exe": [
+    "patcher",
+    "патчер",
+    "патч",
+    "апдейтер",
+    "обновитель"
+  ],
+  "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\146.0.3856.84\\msedgewebview2.exe": [
+    "msedgewebview2",
+    "мсаедж вебвью",
+    "вебвью",
+    "runtime",
+    "раунтайм",
+    "движок"
   ]
 }

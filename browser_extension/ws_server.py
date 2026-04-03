@@ -96,8 +96,15 @@ def _run_thread():
     _loop.run_until_complete(_serve())
 
 
+def is_running() -> bool:
+    """Возвращает True если WS сервер уже запущен."""
+    return _loop is not None
+
+
 def start_thread():
     """Запускает WS сервер в фоновом потоке. Вызвать один раз при старте."""
+    if is_running():
+        return
     t = threading.Thread(target=_run_thread, daemon=True, name="ws-bridge")
     t.start()
     # Ждём пока сервер реально начнёт слушать (или упадёт)

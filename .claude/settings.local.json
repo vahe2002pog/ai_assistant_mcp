@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp -r \"D:/Desktop/UFO-2.0.0/ufo\" \"D:/Desktop/AA/ai_assistant_mcp/ufo\")",
+      "Bash(cp -r \"D:/Desktop/UFO-2.0.0/learner\" \"D:/Desktop/AA/ai_assistant_mcp/learner\")",
+      "Bash(cp -r \"D:/Desktop/UFO-2.0.0/dataflow\" \"D:/Desktop/AA/ai_assistant_mcp/dataflow\")",
+      "Bash(cp -r \"D:/Desktop/UFO-2.0.0/record_processor\" \"D:/Desktop/AA/ai_assistant_mcp/record_processor\")",
+      "Bash(cp -r \"D:/Desktop/UFO-2.0.0/vectordb\" \"D:/Desktop/AA/ai_assistant_mcp/vectordb\")",
+      "Bash(grep -r ufo D:DesktopAAai_assistant_mcp --include=*.py -l)",
+      "Bash(grep -r ufo D:DesktopAAai_assistant_mcp --include=*.yaml -l)",
+      "Bash(python -c \":*)",
+      "Read(//tmp/**)",
+      "Bash(python -m pip install fastmcp -q)",
+      "Bash(python -m pip install send2trash websockets aiohttp -q)",
+      "Bash(.venv/Scripts/python.exe -c \"from ui_automation.automator.app_apis import factory\")",
+      "Bash(.venv/Scripts/python.exe -c \"from ui_automation.agents.agent.host_agent import HostAgent; print\\(''OK''\\)\")"
+    ]
+  }
+}

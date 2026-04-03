@@ -1,54 +1,40 @@
 """
-Главный входной файл MCP сервера.
-Собирает все модули и запускает сервер.
+MCP сервер — точка входа.
+Регистрирует все субагент-инструменты и запускает FastMCP сервер.
+
+Субагенты и их инструменты:
+  WebAgent       → tools_web.py        (Tavily поиск, extract, open_url)
+  FileAgent      → tools_files.py      (чтение, запись, копирование файлов)
+  AppAgent       → tools_apps.py       (запуск приложений)
+  WeatherAgent   → tools_weather.py    (погода)
+  MediaAgent     → tools_media.py      (громкость, медиаконтроль)
+  BrowserAgent   → tools_browser.py    (управление браузером через расширение)
+    UIAgent        → tools_uiautomation.py (окна, клики, ввод — через pywinauto/Compass)
 """
 
 import sys
 import os
 
-# Принудительно установить кодировку ввода/вывода в UTF-8 для корректной
-# работы обмена по stdio между процессами на Windows (избегает UnicodeDecodeError
-# при чтении stdout клиента). Устанавливаем переменную окружения и, если
-# возможно, перенастраиваем stdout/stderr.
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 try:
-    # Начиная с Python 3.7 можно перенастроить stdout напрямую
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 except Exception:
     pass
 
-# Добавляем родительскую папку в sys.path для импортов
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Импортируем ядро сервера
 from mcp_modules.mcp_core import mcp
 
-# Импортируем все инструменты (это регистрирует их в mcp)
-import mcp_modules.tools_apps
-import mcp_modules.tools_files
-import mcp_modules.tools_web
-import mcp_modules.tools_weather
-import mcp_modules.tools_media
-import mcp_modules.tools_browser 
-# Подключаем локально скопированные инструменты UIAutomation (если есть)
-# try:
-from mcp_uiautomation.tools import (
-    register_discovery_tools,
-    register_interaction_tools,
-    register_query_tools,
-    register_pattern_tools,
-    register_helper_tools,
-)
-
-# Регистрируем инструменты в общем объекте mcp
-register_discovery_tools(mcp)
-register_interaction_tools(mcp)
-register_query_tools(mcp)
-register_pattern_tools(mcp)
-register_helper_tools(mcp)
-# except Exception as e:
-#     print(f"Не удалось подключить mcp_uiautomation: {e}")
+# ── регистрация инструментов каждого субагента ────────────────────────────────
+import mcp_modules.tools_web           # WebAgent
+import mcp_modules.tools_files         # FileAgent
+import mcp_modules.tools_apps          # AppAgent
+import mcp_modules.tools_weather       # WeatherAgent
+import mcp_modules.tools_media         # MediaAgent
+import mcp_modules.tools_browser       # BrowserAgent
+import mcp_modules.tools_uiautomation  # UIAgent (заменяет mcp_uiautomation)
+import mcp_modules.tools_llama         # LlamaAgent (llama.cpp без указания модели)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
