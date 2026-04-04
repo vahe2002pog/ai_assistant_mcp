@@ -25,7 +25,7 @@ pycaw>=20240210
 
 # ── Vision & Images ──────────────────────────────────────────────────────────
 Pillow>=10.3.0
-gradio-client>=1.7.1          # OmniParser service client
+#gradio-client>=1.7.1          # OmniParser service client
 
 # ── Vector Search / RAG ──────────────────────────────────────────────────────
 faiss-cpu>=1.8.0

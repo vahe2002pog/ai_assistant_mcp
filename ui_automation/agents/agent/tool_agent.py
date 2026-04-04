@@ -270,11 +270,37 @@ class ToolAgent:
                 result = self._call_tool(fn_name, args)
                 preview = result[:400] + ("…" if len(result) > 400 else "")
                 print(f"  → {preview}", flush=True)
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": result,
                 })
+
+                # Если инструмент вернул скриншот — добавить изображение отдельным user-сообщением,
+                # чтобы vision-модель могла видеть экран и кликать по реальным координатам.
+                # (tool-сообщения не поддерживают image_url, только user-сообщения)
+                if fn_name == "ui_screenshot" and "сохранён:" in result:
+                    path = result.split("сохранён:")[-1].strip()
+                    try:
+                        import base64 as _b64
+                        with open(path, "rb") as f:
+                            img_b64 = _b64.b64encode(f.read()).decode("ascii")
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "Это скриншот. Найди нужный элемент на изображении и используй ui_click(x, y) с его реальными координатами.",
+                                },
+                            ],
+                        })
+                    except Exception:
+                        pass
 
             if done:
                 return result_summary
