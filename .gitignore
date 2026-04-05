@@ -12,3 +12,4 @@ ui_agent_debug.log
 llama-server/*
 models/*
 llm_aliases_cache.json
+CLAUDE.md

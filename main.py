@@ -501,9 +501,10 @@ def _rag_retrieve(query: str, top_k: int = 3) -> str:
     """
     results = []
     _RAG_PATHS = [
-        ("vectordb/experience", "Опыт"),
-        ("vectordb/demonstration", "Демонстрация"),
-        ("vectordb/docs/example", "Документация"),
+        ("vectordb/experience",      "Опыт"),
+        ("vectordb/knowledge_index", "База знаний"),
+        ("vectordb/demonstration",   "Демонстрация"),
+        ("vectordb/docs/example",    "Документация"),
     ]
 
     try:

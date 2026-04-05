@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -325,7 +326,26 @@ class HostAgent:
 
         utils.print_with_color(f"\n[HostAgent] Готово:\n{final}", "green")
 
+        # Сохраняем опыт в RAG в фоновом потоке (не блокируем ответ)
+        _save_experience_async(task, final, stack)
+
         from ui_automation.agents.agent.response_formatter import ResponseFormatter
         response = ResponseFormatter().format(final, user_query=task)
         utils.print_with_color(f"[HostAgent] voice: {response.voice}", "cyan")
         return response
+
+
+def _save_experience_async(task: str, result: str, stack: list) -> None:
+    """Сохраняет опыт выполнения задачи в RAG vectordb/experience (фоновый поток)."""
+    agent_types = []
+    for item in stack:
+        agent_types.extend(item.agents)
+
+    def _worker():
+        try:
+            from ui_automation.rag.experience_manager import save_experience
+            save_experience(task, result, agent_types)
+        except Exception as e:
+            utils.print_with_color(f"[RAG] Не удалось сохранить опыт: {e}", "yellow")
+
+    threading.Thread(target=_worker, daemon=True).start()

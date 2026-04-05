@@ -13,7 +13,7 @@ openai>=1.66.0
 # ── LangChain (RAG internals) ────────────────────────────────────────────
 langchain>=0.1.11
 langchain-community>=0.0.27
-# langchain-huggingface>=0.1.0   # optional: enable if CONTROL_FILTER_TYPE: [SEMANTIC]
+langchain-huggingface>=0.1.0
 
 # ── Windows UI Automation ────────────────────────────────────────────────────
 pywin32>=306
