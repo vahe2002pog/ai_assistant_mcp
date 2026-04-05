@@ -47,6 +47,26 @@ def _init_db() -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alias ON app_aliases(alias)")
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE,
+                browser TEXT NOT NULL,
+                folder TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bookmark_title ON bookmarks(title)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bookmark_browser ON bookmarks(browser)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bookmark_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bookmark_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                FOREIGN KEY (bookmark_id) REFERENCES bookmarks(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bookmark_alias ON bookmark_aliases(alias)")
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS action_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 action_type TEXT NOT NULL,
@@ -290,5 +310,97 @@ def apps_count() -> int:
     try:
         cur = conn.execute("SELECT COUNT(1) FROM apps")
         return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+# ── Bookmarks ─────────────────────────────────────────────────────────────────
+
+def bookmarks_clear() -> None:
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM bookmarks")
+    finally:
+        conn.close()
+
+
+def bookmarks_put_many(items: list) -> None:
+    """items: [(title, url, browser, folder), ...]"""
+    conn = _get_conn()
+    try:
+        conn.executemany(
+            "INSERT OR IGNORE INTO bookmarks (title, url, browser, folder) VALUES (?, ?, ?, ?)",
+            items,
+        )
+    finally:
+        conn.close()
+
+
+def bookmarks_add_aliases_bulk(items: list) -> None:
+    """items: [(url, [aliases]), ...]"""
+    conn = _get_conn()
+    try:
+        cur = conn.execute("SELECT id, url FROM bookmarks")
+        url_to_id = {row[1]: row[0] for row in cur.fetchall()}
+        rows = []
+        for url, aliases in items:
+            bm_id = url_to_id.get(url)
+            if bm_id:
+                for a in aliases:
+                    if a:
+                        rows.append((bm_id, a.lower()))
+        if rows:
+            conn.executemany(
+                "INSERT OR IGNORE INTO bookmark_aliases (bookmark_id, alias) VALUES (?, ?)",
+                rows,
+            )
+    finally:
+        conn.close()
+
+
+def bookmarks_search(query: str, limit: int = 10) -> list:
+    """Возвращает [(title, url, browser, folder), ...]"""
+    conn = _get_conn()
+    try:
+        q = f"%{query.lower()}%"
+        cur = conn.execute(
+            """
+            SELECT DISTINCT b.title, b.url, b.browser, b.folder FROM bookmarks b
+            LEFT JOIN bookmark_aliases ba ON ba.bookmark_id = b.id
+            WHERE LOWER(b.title) LIKE ? OR LOWER(b.url) LIKE ? OR ba.alias LIKE ?
+            ORDER BY
+                CASE
+                    WHEN LOWER(b.title) = ? THEN 0
+                    WHEN ba.alias = ? THEN 1
+                    WHEN LOWER(b.title) LIKE ? THEN 2
+                    ELSE 3
+                END,
+                b.title
+            LIMIT ?
+            """,
+            (q, q, q, query.lower(), query.lower(), f"{query.lower()}%", limit),
+        )
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def bookmarks_count() -> int:
+    conn = _get_conn()
+    try:
+        cur = conn.execute("SELECT COUNT(1) FROM bookmarks")
+        return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def bookmarks_list_browsers() -> list:
+    """Возвращает список браузеров с количеством закладок."""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT browser, COUNT(1) as cnt FROM bookmarks GROUP BY browser ORDER BY cnt DESC"
+        )
+        return cur.fetchall()
     finally:
         conn.close()
