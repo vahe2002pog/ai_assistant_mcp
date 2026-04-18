@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "AI Assistant MCP Bridge",
+  "name": "Компас — MCP Bridge",
   "version": "1.0",
   "description": "Bridges AI assistant MCP tools with the browser",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "permissions": [
     "tabs",
     "activeTab",
@@ -16,6 +22,12 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "AI Assistant Bridge"
+    "default_title": "Компас Bridge",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   }
 }

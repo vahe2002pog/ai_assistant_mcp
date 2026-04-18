@@ -16,7 +16,8 @@ class BrowserAgent(ToolAgent):
 
     TOOLS_MODULES = ["mcp_modules.tools_browser"]
 
-    SYSTEM_PROMPT = """Ты — браузерный агент. Управляешь браузером через Chrome расширение.
+    SYSTEM_PROMPT = """/no_think
+Ты — браузерный агент. Управляешь браузером через Chrome расширение.
 
 Доступные инструменты:
 - browser_get_state       — текущий URL, заголовок, список вкладок, интерактивные элементы с индексами

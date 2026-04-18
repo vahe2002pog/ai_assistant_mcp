@@ -25,10 +25,10 @@ import openai
 
 from ui_automation.agents.agent.tool_agent import (
     ToolAgent,
-    _API_BASE, _API_KEY, _API_MODEL, _NO_THINK,
     _TASK_DONE, _TASK_DONE_SCHEMA,
     _build_tool_schema, _resolve_special,
 )
+from ui_automation import llm_config as _llm
 
 import asyncio
 import inspect
@@ -42,7 +42,8 @@ class VisionAgent(ToolAgent):
 
     TOOLS_MODULES = ["mcp_modules.tools_vision"]
 
-    SYSTEM_PROMPT = """Ты — агент компьютерного зрения. Анализируешь скриншот экрана.
+    SYSTEM_PROMPT = """/no_think
+Ты — агент компьютерного зрения. Анализируешь скриншот экрана.
 
 Тебе передаётся изображение экрана вместе с задачей пользователя. Твоя цель:
 1. Внимательно прочитай изображение.
@@ -98,13 +99,13 @@ class VisionAgent(ToolAgent):
         # ── 3. Tool-calling loop ──────────────────────────────────────────────
         while True:
             try:
-                response = self._client.chat.completions.create(
-                    model=_API_MODEL,
+                response = _llm.get_client().chat.completions.create(
+                    model=_llm.get_model(),
                     messages=messages,
                     tools=self._schemas,
                     tool_choice="required",
                     temperature=0.1,
-                    extra_body=_NO_THINK,
+                    extra_body=_llm.get_extra_body(),
                 )
             except openai.APIConnectionError:
                 return "Ошибка: нет соединения с моделью."

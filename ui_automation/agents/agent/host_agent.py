@@ -4,18 +4,12 @@ import json
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import openai
 
-from ui_automation import utils
+from ui_automation import utils, llm_config as _llm
 from ui_automation.agents.memory.blackboard import Blackboard
-
-# ── LLM config (shared with tool_agent.py) ───────────────────────────────────
-_API_BASE  = os.environ.get("API_BASE",  "http://localhost:8000/v1")
-_API_KEY   = os.environ.get("API_KEY",   "llama")
-_API_MODEL = os.environ.get("API_MODEL", "Qwen3.5-9B-abliterated-vision-Q4_K_M")
-_NO_THINK  = {"chat_template_kwargs": {"enable_thinking": False}}
 
 # ── Keyword routing tables ────────────────────────────────────────────────────
 _BROWSER_KW = (
@@ -29,13 +23,6 @@ _WEB_KW = (
     "найди информацию", "поищи", "погода", "курс валют", "курс доллар",
     "новости", "что такое", "кто такой", "когда был", "сколько стоит",
     "wikipedia", "вики", "актуальн", "последние данные",
-)
-_OFFICE_KW = (
-    "excel", "word", "powerpoint", ".docx", ".xlsx", ".pptx", ".doc", ".xls",
-    "ячейк", "формул", "лист excel", "книг excel", "таблиц в excel",
-    "документ word", "абзац", "найди в документ", "заголовок документ",
-    "прочитай excel", "запиши в excel", "прочитай word", "запиши в word",
-    "открой excel", "открой word", "открой powerpoint",
 )
 _SYSTEM_KW = (
     "запусти приложение", "открой приложение", "закрой приложение",
@@ -54,14 +41,49 @@ _VISION_KW = (
     "что изображено на экране", "текст на экране",
 )
 
-_VALID_AGENTS = {"browser", "web", "office", "system", "vision"}
+# Разговорные/знаниевые маркеры — отдаём ChatAgent, без поиска и инструментов.
+_CHAT_KW = (
+    "привет", "здорово", "здравствуй", "hi", "hello",
+    "как дела", "как ты", "как настроение",
+    "спасибо", "благодарю", "пока", "до свидания",
+    "расскажи анекдот", "расскажи шутку", "пошути",
+    "кто ты", "что ты умеешь", "как тебя зовут", "что ты такое",
+    "как ты думаешь", "что ты думаешь", "твоё мнение", "твое мнение",
+    "объясни простыми словами", "в чём смысл", "в чем смысл",
+)
+
+_VALID_AGENTS = {"browser", "web", "system", "vision", "chat"}
+
+# Web-инструменты HostAgent использует сам, без отдельного подагента.
+_WEB_TOOLS_MODULES = ["mcp_modules.tools_web", "mcp_modules.tools_weather"]
+_WEB_SYSTEM_PROMPT = """/no_think
+Ты — веб-агент. Ищешь информацию в интернете и проверяешь погоду.
+
+Инструменты:
+- tavily_search(query, search_depth="basic") — быстрый поиск, сниппеты + ссылки.
+- tavily_extract — полный текст страницы (только если сниппетов не хватает).
+- get_weather — погода для города.
+
+ПРАВИЛА:
+1. tavily_search(search_depth="basic") — дефолт (1–2 сек). advanced — ТОЛЬКО если basic не помог.
+2. Не вызывай open_url/browser_search для поиска — только если пользователь явно попросил открыть ссылку.
+3. После ответа — task_done(summary="краткий ответ пользователю").
+"""
+
+_CHAT_SYSTEM_PROMPT = (
+    "/no_think\n"
+    "Ты — Компас, умный персональный ассистент на русском языке. "
+    "Отвечай кратко, по делу и дружелюбно. Если знаешь ответ на знаниевый вопрос — "
+    "отвечай сразу. Если вопрос требует актуальных данных (новости, цены, курсы, погода) "
+    "или ты не уверен — честно скажи и предложи поискать. Не выдумывай факты."
+)
 
 
 @dataclass
 class TaskItem:
     """Единица работы в стеке задач HostAgent."""
     task: str
-    agents: List[str] = field(default_factory=lambda: ["system"])
+    agents: List[str] = field(default_factory=lambda: ["chat"])
 
     def __repr__(self) -> str:
         return f"TaskItem(agents={self.agents}, task={self.task[:60]!r})"
@@ -69,46 +91,137 @@ class TaskItem:
 
 class HostAgent:
     """
-    Оркестратор: принимает запрос, декомпозирует на подзадачи и
-    делегирует BrowserAgent / WebAgent / OfficeAgent / SystemAgent.
+    Оркестратор: принимает запрос, декомпозирует на подзадачи, сам отвечает
+    на разговорные/знаниевые вопросы и ищет в интернете, а для управления
+    системой/браузером/экраном делегирует ToolAgent / BrowserAgent / VisionAgent.
     """
 
     def __init__(self, name: str = "HostAgent") -> None:
         self._name = name
-        self._blackboard = Blackboard()
+        # Отдельный Blackboard на каждый чат — чтобы параллельные запросы
+        # из разных разговоров не засоряли друг другу «историю задач».
+        self._blackboards: Dict[Any, Blackboard] = {}
+        self._bb_lock = threading.Lock()
+        self._default_bb = Blackboard()
         self.appagent_dict: Dict = {}
         self._active_appagent = None
+
+    def _get_blackboard(self, conv_id: Any = None) -> Blackboard:
+        if conv_id is None:
+            return self._default_bb
+        with self._bb_lock:
+            bb = self._blackboards.get(conv_id)
+            if bb is None:
+                bb = Blackboard()
+                self._blackboards[conv_id] = bb
+            return bb
 
     @property
     def name(self) -> str:
         return self._name
 
-    @property
-    def blackboard(self) -> Blackboard:
-        return self._blackboard
-
     # ── Sub-agent factory ─────────────────────────────────────────────────────
 
     def _make_agent(self, agent_type: str):
-        """Instantiate a sub-agent by type string."""
-        from ui_automation.agents.agent.browser_agent import BrowserAgent
-        from ui_automation.agents.agent.web_agent import WebAgent
-        from ui_automation.agents.agent.system_agent import SystemAgent
-        from ui_automation.agents.agent.office_agent import OfficeAgent
-
+        """Делегируемые подагенты: browser, vision, system (базовый ToolAgent).
+        chat/web обрабатываются самим HostAgent без sub-agent'а."""
+        from ui_automation.agents.agent.tool_agent import ToolAgent
         if agent_type == "browser":
+            from ui_automation.agents.agent.browser_agent import BrowserAgent
             return BrowserAgent("BrowserAgent", host=self)
-        elif agent_type == "web":
-            return WebAgent("WebAgent", host=self)
-        elif agent_type == "office":
-            return OfficeAgent("OfficeAgent", host=self)
-        elif agent_type == "vision":
+        if agent_type == "vision":
             from ui_automation.agents.agent.vision_agent import VisionAgent
             return VisionAgent("VisionAgent", host=self)
-        else:
-            return SystemAgent("SystemAgent", host=self)
+        if agent_type == "web":
+            return ToolAgent("WebAgent", host=self,
+                             tools_modules=_WEB_TOOLS_MODULES,
+                             system_prompt=_WEB_SYSTEM_PROMPT)
+        # system и всё остальное — базовый ToolAgent
+        return ToolAgent("SystemAgent", host=self)
+
+    # ── Inline chat (без инструментов) ───────────────────────────────────────
+
+    def _run_chat(self, task: str) -> str:
+        """Простой LLM-ответ без инструментов. Вызывается напрямую из dispatch."""
+        print(f"\n[ChatAgent] {task.split(chr(10))[0]}", flush=True)
+        messages = [
+            {"role": "system", "content": _CHAT_SYSTEM_PROMPT},
+            {"role": "user",   "content": task},
+        ]
+        for extra in (_llm.get_extra_body(), {}):
+            try:
+                kwargs = dict(
+                    model=_llm.get_model(),
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=1024,
+                )
+                if extra:
+                    kwargs["extra_body"] = extra
+                resp = _llm.get_client().chat.completions.create(**kwargs)
+                msg = resp.choices[0].message
+                text = (msg.content or "").strip()
+                if text:
+                    return text
+                reasoning = getattr(msg, "reasoning_content", None) or ""
+                if reasoning.strip():
+                    return reasoning.strip()
+            except openai.APIConnectionError:
+                return "Ошибка: нет соединения с моделью."
+            except Exception as e:
+                print(f"[ChatAgent] ошибка: {e}", flush=True)
+                if not extra:
+                    return f"Ошибка LLM: {e}"
+        return "Не удалось получить ответ от модели."
 
     # ── Task planning & classification ───────────────────────────────────────
+
+    def _plan_llm_call(self, prompt: str) -> str:
+        """LLM-вызов для планирования с ретраями: json_format → без него, с extra_body → без."""
+        messages = [{"role": "user", "content": prompt}]
+        attempts = [
+            {"response_format": {"type": "json_object"}, "extra": True},
+            {"response_format": None,                    "extra": True},
+            {"response_format": None,                    "extra": False},
+        ]
+        for att in attempts:
+            try:
+                kw = dict(model=_llm.get_model(), messages=messages,
+                          temperature=0.0, max_tokens=1024)
+                if att["response_format"]:
+                    kw["response_format"] = att["response_format"]
+                if att["extra"]:
+                    kw["extra_body"] = _llm.get_extra_body()
+                resp = _llm.get_client().chat.completions.create(**kw)
+                m = resp.choices[0].message
+                raw = (getattr(m, "content", None) or "").strip() \
+                      or (getattr(m, "reasoning_content", None) or "").strip()
+                if raw:
+                    return raw
+            except Exception as e:
+                utils.print_with_color(f"[HostAgent] plan_tasks attempt error: {e}", "yellow")
+        return ""
+
+    @staticmethod
+    def _extract_tasks(raw: str) -> List[Dict]:
+        """Извлекает список подзадач из ответа LLM (объект {tasks:[...]} или голый массив)."""
+        a_start, a_end = raw.find("["), raw.rfind("]") + 1
+        o_start, o_end = raw.find("{"), raw.rfind("}") + 1
+        if o_start != -1 and o_end > o_start:
+            try:
+                obj = json.loads(raw[o_start:o_end])
+                if isinstance(obj, dict):
+                    if isinstance(obj.get("tasks"), list):
+                        return obj["tasks"]
+                    if "task" in obj:
+                        return [obj]
+            except Exception:
+                pass
+        if a_start != -1 and a_end > a_start:
+            arr = json.loads(raw[a_start:a_end])
+            if isinstance(arr, list):
+                return arr
+        raise ValueError("no tasks in payload")
 
     def _plan_tasks(self, task: str, context_hint: str = "") -> List[TaskItem]:
         """
@@ -117,66 +230,72 @@ class HostAgent:
         """
         context_block = f"\n\nКонтекст:\n{context_hint}" if context_hint else ""
         prompt = (
+            "/no_think\n"
             "Разбей задачу пользователя на минимальный список подзадач.\n"
-            "Для каждой подзадачи укажи список агентов из: browser, web, office, system.\n"
-            "Верни ТОЛЬКО валидный JSON-массив, без пояснений:\n"
-            "[\n"
-            "  {\"task\": \"описание подзадачи\", \"agents\": [\"тип_агента\"]},\n"
-            "  ...\n"
-            "]\n\n"
+            "Для каждой подзадачи укажи список агентов из: chat, browser, web, system, vision.\n"
+            "Верни ТОЛЬКО валидный JSON-объект вида:\n"
+            "{\"tasks\": [{\"task\": \"описание\", \"agents\": [\"тип\"]}, ...]}\n\n"
             "Агенты:\n"
-            "  browser — ТОЛЬКО управление веб-браузером (Chrome/Firefox/Edge): вкладки, URL-навигация\n"
-            "  web     — поиск информации в интернете, погода\n"
-            "  office  — Excel, Word, PowerPoint\n"
-            "  system  — ВСЁ что связано с приложениями: запуск, фокус, клики, ввод текста,\n"
-            "            любые действия внутри любого приложения (Steam, Discord, Telegram,\n"
-            "            проводник, блокнот, калькулятор и т.д.), файлы, звук\n"
+            "  chat    — просто поговорить или ответить на знаниевый вопрос без поиска\n"
+            "            (приветствия, мнение, объяснения, общие факты)\n"
+            "  browser — ВСЁ что происходит внутри веб-браузера: вкладки, URL-навигация,\n"
+            "            ввод текста в поля на сайте, клики по элементам страницы, формы,\n"
+            "            прокрутка, чтение содержимого страницы. Если действие идёт\n"
+            "            «в браузере», «во вкладке», «на сайте», «в Chrome/Firefox/Edge» —\n"
+            "            это browser, а НЕ system.\n"
+            "  web     — поиск АКТУАЛЬНОЙ информации в интернете (новости, цены, погода)\n"
+            "  system  — действия в обычных приложениях (НЕ браузере): запуск, фокус, клики,\n"
+            "            ввод текста, любые действия внутри Steam, Discord, Telegram,\n"
+            "            проводника, блокнота, калькулятора и т.д., файлы, звук\n"
             "  vision  — ТОЛЬКО если пользователь явно просит посмотреть/прочитать/распознать что-то на экране\n\n"
-            "АБСОЛЮТНОЕ ПРАВИЛО: любая работа с приложениями — ТОЛЬКО system.\n"
-            "browser НЕ управляет приложениями — только веб-браузером.\n\n"
-            "Для задач с приложениями (system) декомпозируй в следующем порядке:\n"
-            "  1. Найти приложение в базе (list_apps)\n"
-            "  2. Проверить, открыто ли окно (ui_list_windows)\n"
-            "  3. Открыть или сфокусировать приложение\n"
-            "  4. Выполнить действие в приложении\n\n"
+            "РАЗГРАНИЧЕНИЕ browser vs system:\n"
+            "  • Упоминание браузера/вкладки/сайта → browser.\n"
+            "  • Упоминание другого приложения (Steam, Word, ...) → system.\n"
+            "  • «Запусти Chrome» (именно процесс, без навигации) → system.\n"
+            "  • «Открой сайт X», «перейди на X», «напиши во вкладке» → browser.\n\n"
+            "ГЛАВНОЕ ПРАВИЛО ДЕКОМПОЗИЦИИ — минимум подзадач:\n"
+            "  • Простой запрос = ОДНА подзадача. Не дроби без необходимости.\n"
+            "  • «открой X», «запусти X» → ОДНА подзадача «открыть X» (агент system сам всё сделает).\n"
+            "  • НЕ добавляй служебных шагов «найти в базе», «проверить открыто ли», «подготовить» —\n"
+            "    sub-agent делает это сам внутри одной подзадачи.\n"
+            "  • НЕ добавляй действий, которых НЕТ в запросе пользователя (не создавай документ,\n"
+            "    не сохраняй файл, не вводи текст, если об этом не просили).\n"
+            "  • Дроби на несколько подзадач ТОЛЬКО если пользователь явно указал несколько\n"
+            "    разных действий («открой Word и напиши текст» = 2 подзадачи).\n\n"
             f"Задача: {task}{context_block}\n\nJSON:"
         )
-        try:
-            client = openai.OpenAI(base_url=_API_BASE, api_key=_API_KEY)
-            resp = client.chat.completions.create(
-                model=_API_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=512,
-                extra_body=_NO_THINK,
-            )
-            raw = resp.choices[0].message.content.strip()
-            start = raw.find("[")
-            end = raw.rfind("]") + 1
-            if start == -1 or end == 0:
-                raise ValueError("No JSON array found")
-            items_raw: List[Dict] = json.loads(raw[start:end])
-            stack: List[TaskItem] = []
-            for item in items_raw:
-                t = item.get("task", "").strip()
-                if not t:
-                    continue
-                raw_agents = item.get("agents", [])
-                agents = [a for a in raw_agents if a in _VALID_AGENTS] or ["system"]
-                # Принудительно: если задача содержит работу с приложением — только system
-                if "browser" in agents and not any(k in t.lower() for k in ("сайт", "вкладк", "url", "http", "браузер", "chrome", "firefox", "edge")):
-                    agents = ["system" if a == "browser" else a for a in agents]
-                stack.append(TaskItem(task=t, agents=agents))
-            if stack:
-                return stack
-        except Exception as e:
-            utils.print_with_color(f"[HostAgent] plan_tasks error: {e}", "yellow")
+        raw = self._plan_llm_call(prompt)
+        if raw:
+            try:
+                items_raw = self._extract_tasks(raw)
+                stack: List[TaskItem] = []
+                for item in items_raw:
+                    t = (item.get("task") or "").strip()
+                    if not t:
+                        continue
+                    raw_agents = item.get("agents", [])
+                    agents = [a for a in raw_agents if a in _VALID_AGENTS] or ["chat"]
+                    tl = t.lower()
+                    _BROWSER_MARKERS = ("сайт", "вкладк", "url", "http", "браузер", "chrome", "firefox", "edge", "в хроме", "в фаерфокс")
+                    has_browser_marker = any(k in tl for k in _BROWSER_MARKERS)
+                    if "browser" in agents and not has_browser_marker:
+                        agents = ["system" if a == "browser" else a for a in agents]
+                    # Обратная нормализация: действие явно во вкладке/браузере, но LLM
+                    # отнёс его к system — исправляем на browser (у него DOM-инструменты,
+                    # Win32 SendInput в веб-поля доставляется ненадёжно).
+                    if "system" in agents and has_browser_marker:
+                        agents = ["browser" if a == "system" else a for a in agents]
+                    stack.append(TaskItem(task=t, agents=agents))
+                if stack:
+                    return stack
+            except Exception as e:
+                utils.print_with_color(f"[HostAgent] plan_tasks parse error: {e} | raw={raw[:200]!r}", "yellow")
 
         return [TaskItem(task=task, agents=[self.classify_task(task)])]
 
     def classify_task(self, task: str) -> str:
         """
-        Classify a task as 'browser', 'web', 'office', or 'system'.
+        Classify a task as 'chat', 'browser', 'web', 'system', or 'vision'.
 
         Strategy:
           1. Keyword scan (fast, deterministic)
@@ -184,14 +303,14 @@ class HostAgent:
         """
         t = task.lower()
 
+        if any(k in t for k in _CHAT_KW):
+            return "chat"
+
         if any(k in t for k in _BROWSER_KW):
             return "browser"
 
         if any(k in t for k in _WEB_KW):
             return "web"
-
-        if any(k in t for k in _OFFICE_KW):
-            return "office"
 
         if any(k in t for k in _SYSTEM_KW):
             return "system"
@@ -200,43 +319,62 @@ class HostAgent:
         if any(k in t for k in _VISION_KW):
             return "vision"
 
+        # Императивный глагол действия → system (работа с приложением/ОС).
+        _ACTION_VERBS = (
+            "создай", "нажми", "кликни", "введи", "напиши", "вставь",
+            "закрой", "заверши", "выйди", "сверни", "разверни", "переключись",
+            "сохрани", "удали", "скопируй", "вырежи", "перемести", "переименуй",
+            "запусти", "останови", "включи", "выключи", "открой",
+        )
+        first = t.split()[0] if t.split() else ""
+        if first in _ACTION_VERBS:
+            return "system"
+
+        # Нет глагола-действия — это знаниевый/разговорный запрос.
+        # LLM-классификатор решит: chat (если уверен в ответе) или web
+        # (если нужны актуальные данные).
         return self._llm_classify(task)
 
     def _llm_classify(self, task: str) -> str:
         """Single LLM call to classify task type."""
         prompt = (
+            "/no_think\n"
             "Определи тип задачи — ответь ТОЛЬКО одним словом без пояснений:\n"
+            "  chat    — разговор, приветствие, мнение, знаниевый вопрос на который\n"
+            "            можно уверенно ответить БЕЗ актуальных данных\n"
+            "            (общие факты, определения, объяснения, история)\n"
+            "  web     — нужны АКТУАЛЬНЫЕ данные: новости, цены, курсы, погода,\n"
+            "            расписания, события, статистика за последнее время\n"
             "  browser — ТОЛЬКО веб-браузер (Chrome/Firefox/Edge): вкладки, URL-навигация\n"
-            "  web     — поиск информации в интернете, погода, новости\n"
-            "  office  — работа с Excel, Word, PowerPoint (чтение/запись данных, формулы)\n"
             "  system  — ВСЁ что связано с приложениями: любые действия в любом приложении\n"
             "  vision  — ТОЛЬКО если пользователь явно просит посмотреть/прочитать/распознать что-то на экране\n\n"
-            "АБСОЛЮТНОЕ ПРАВИЛО: любая работа с приложениями — ТОЛЬКО system, никогда browser.\n\n"
+            "АБСОЛЮТНОЕ ПРАВИЛО: любая работа с приложениями — ТОЛЬКО system, никогда browser.\n"
+            "Если вопрос знаниевый и ответ не зависит от «сегодня/сейчас» — это chat, не web.\n\n"
             f"Задача: {task}\n\nОтвет:"
         )
         try:
-            client = openai.OpenAI(base_url=_API_BASE, api_key=_API_KEY)
-            resp = client.chat.completions.create(
-                model=_API_MODEL,
+            resp = _llm.get_client().chat.completions.create(
+                model=_llm.get_model(),
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=5,
-                extra_body=_NO_THINK,
+                extra_body=_llm.get_extra_body(),
             )
             answer = resp.choices[0].message.content.strip().lower()
-            for candidate in ("browser", "web", "office", "system"):
+            for candidate in ("chat", "browser", "web", "system", "vision"):
                 if candidate in answer:
                     return candidate
         except Exception as e:
             utils.print_with_color(f"[HostAgent] classify LLM error: {e}", "yellow")
-        return "system"
+        # Безопасный фоллбек: разговор без инструментов лучше, чем отказ.
+        return "chat"
 
     # ── Blackboard context ────────────────────────────────────────────────────
 
-    def _blackboard_context(self) -> str:
+    def _blackboard_context(self, conv_id: Any = None) -> str:
         """Returns a summary of the last 3 tasks from Blackboard, or empty string."""
         try:
-            items = self._blackboard.requests.content
+            items = self._get_blackboard(conv_id).requests.content
             if not items:
                 return ""
             lines = []
@@ -256,7 +394,7 @@ class HostAgent:
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
-    def dispatch(self, task: str, context_hint: str = "") -> str:
+    def dispatch(self, task: str, context_hint: str = "", conv_id: Any = None) -> str:
         """
         Main entry point for chat-mode requests.
 
@@ -266,7 +404,7 @@ class HostAgent:
            them one after another, passing the previous result as context.
         4. Returns combined summary.
         """
-        bb_ctx = self._blackboard_context()
+        bb_ctx = self._blackboard_context(conv_id)
         if bb_ctx:
             context_hint = f"[История предыдущих задач]\n{bb_ctx}\n\n" + context_hint
 
@@ -282,7 +420,11 @@ class HostAgent:
 
         step_results: List[str] = []
 
+        from ui_automation import cancel as _cancel
         for idx, item in enumerate(stack):
+            if _cancel.is_cancelled():
+                utils.print_with_color("[HostAgent] Отменено пользователем.", "yellow")
+                break
             step_num = f"[{idx + 1}/{total}]"
 
             prev_ctx = ""
@@ -297,22 +439,25 @@ class HostAgent:
                     f"[HostAgent] {step_num} агент={agent_type} | {item.task[:80]}",
                     "magenta",
                 )
-                agent = self._make_agent(agent_type)
-                self.appagent_dict[agent.name] = agent
-                self._active_appagent = agent
-
                 full_subtask = item.task + prev_ctx
                 if context_hint:
                     full_subtask += "\n\n" + context_hint
 
-                result = agent.execute(full_subtask)
+                if agent_type == "chat":
+                    result = self._run_chat(full_subtask)
+                else:
+                    agent = self._make_agent(agent_type)
+                    self.appagent_dict[agent.name] = agent
+                    self._active_appagent = agent
+                    result = agent.execute(full_subtask)
+
                 item_results.append(result)
                 prev_ctx += f"\n[{agent_type}]: {result}"
 
             combined = " | ".join(item_results) if item_results else ""
             step_results.append(combined)
 
-            self._blackboard.add_requests({
+            self._get_blackboard(conv_id).add_requests({
                 "task": item.task[:200],
                 "agent": "+".join(item.agents),
                 "result": combined[:300],
@@ -328,6 +473,17 @@ class HostAgent:
 
         # Сохраняем опыт в RAG в фоновом потоке (не блокируем ответ)
         _save_experience_async(task, final, stack)
+
+        # Если задача состояла только из chat-агентов — отдаём ответ как есть,
+        # без форматтера (он превратит дружелюбный текст в казённый «voice»).
+        only_chat = all(
+            all(a == "chat" for a in item.agents) for item in stack
+        ) if stack else False
+        if only_chat:
+            from ui_automation.agents.agent.response_formatter import AssistantResponse
+            response = AssistantResponse(voice=final)
+            utils.print_with_color(f"[HostAgent] voice: {response.voice}", "cyan")
+            return response
 
         from ui_automation.agents.agent.response_formatter import ResponseFormatter
         response = ResponseFormatter().format(final, user_query=task)

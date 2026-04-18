@@ -74,6 +74,31 @@ def _init_db() -> None:
                 created_ts INTEGER NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT '',
+                created_ts INTEGER NOT NULL,
+                updated_ts INTEGER NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                response_json TEXT,
+                attachments TEXT,
+                created_ts INTEGER NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, id)")
+        try:
+            conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
+        except Exception:
+            pass
         cur = conn.execute("SELECT COUNT(1) FROM cache")
         total = cur.fetchone()[0]
         if total > MAX_CACHE:
@@ -402,5 +427,95 @@ def bookmarks_list_browsers() -> list:
             "SELECT browser, COUNT(1) as cnt FROM bookmarks GROUP BY browser ORDER BY cnt DESC"
         )
         return cur.fetchall()
+    finally:
+        conn.close()
+
+
+# ── Conversations / Messages ────────────────────────────────────────────────
+
+def conv_create(title: str = "") -> int:
+    ts = int(time.time())
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO conversations (title, created_ts, updated_ts) VALUES (?, ?, ?)",
+            (title, ts, ts),
+        )
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def conv_list(limit: int = 100) -> list:
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT id, title, created_ts, updated_ts FROM conversations "
+            "ORDER BY updated_ts DESC LIMIT ?",
+            (limit,),
+        )
+        return [
+            {"id": r[0], "title": r[1], "created_ts": r[2], "updated_ts": r[3]}
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def conv_delete(conv_id: int) -> None:
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM messages WHERE conversation_id=?", (conv_id,))
+        conn.execute("DELETE FROM conversations WHERE id=?", (conv_id,))
+    finally:
+        conn.close()
+
+
+def conv_set_title(conv_id: int, title: str) -> None:
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE conversations SET title=?, updated_ts=? WHERE id=?",
+            (title, int(time.time()), conv_id),
+        )
+    finally:
+        conn.close()
+
+
+def msg_add(conv_id: int, role: str, content: str,
+            response_json: Optional[str] = None,
+            attachments: Optional[list] = None) -> int:
+    ts = int(time.time())
+    att_json = json.dumps(attachments) if attachments else None
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, response_json, attachments, created_ts) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (conv_id, role, content, response_json, att_json, ts),
+        )
+        conn.execute("UPDATE conversations SET updated_ts=? WHERE id=?", (ts, conv_id))
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def msg_list(conv_id: int) -> list:
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT id, role, content, response_json, attachments, created_ts FROM messages "
+            "WHERE conversation_id=? ORDER BY id ASC",
+            (conv_id,),
+        )
+        return [
+            {
+                "id": r[0], "role": r[1], "content": r[2],
+                "response": json.loads(r[3]) if r[3] else None,
+                "attachments": json.loads(r[4]) if r[4] else [],
+                "created_ts": r[5],
+            }
+            for r in cur.fetchall()
+        ]
     finally:
         conn.close()

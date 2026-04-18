@@ -20,10 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import openai
 
-_API_BASE  = os.environ.get("API_BASE",  "http://localhost:8000/v1")
-_API_KEY   = os.environ.get("API_KEY",   "llama")
-_API_MODEL = os.environ.get("API_MODEL", "Qwen3.5-9B-abliterated-vision-Q4_K_M")
-_NO_THINK  = {"chat_template_kwargs": {"enable_thinking": False}}
+from ui_automation import llm_config as _llm
 
 # ─── Модели данных ────────────────────────────────────────────────────────────
 
@@ -90,7 +87,8 @@ class AssistantResponse:
 
 # ─── Системный промпт форматтера ──────────────────────────────────────────────
 
-_FORMAT_SYSTEM = """Ты — форматтер ответов ассистента.
+_FORMAT_SYSTEM = """/no_think
+Ты — форматтер ответов ассистента.
 Тебе дан сырой результат выполнения задачи и запрос пользователя.
 Тебе нужно сформировать финальный структурированный ответ.
 
@@ -126,7 +124,7 @@ class ResponseFormatter:
     """Превращает сырой строковый результат агента в AssistantResponse."""
 
     def __init__(self) -> None:
-        self._client = openai.OpenAI(base_url=_API_BASE, api_key=_API_KEY)
+        pass
 
     def format(self, raw: str, user_query: str = "") -> AssistantResponse:
         """
@@ -146,15 +144,15 @@ class ResponseFormatter:
         )
 
         try:
-            resp = self._client.chat.completions.create(
-                model=_API_MODEL,
+            resp = _llm.get_client().chat.completions.create(
+                model=_llm.get_model(),
                 messages=[
                     {"role": "system", "content": _FORMAT_SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
                 max_tokens=1024,
-                extra_body=_NO_THINK,
+                extra_body=_llm.get_extra_body(),
             )
             content = resp.choices[0].message.content.strip()
             return self._parse(content, raw)

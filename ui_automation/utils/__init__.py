@@ -2,6 +2,7 @@ import importlib
 import functools
 import json
 import os
+import threading
 from typing import Optional, Any, Dict
 
 from colorama import Fore, Style, init
@@ -147,15 +148,45 @@ def append_string_to_file(file_path: str, string: str) -> None:
         file.write(string + "\n")
 
 
-@functools.lru_cache(maxsize=5)
+_EMB_CACHE: Dict[str, Any] = {}
+_EMB_LOCK = threading.Lock()
+
+
+# Отключаем шумные прогресс-бары/логи до первого импорта transformers.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TQDM_DISABLE", "1")
+
+
+def _silence_st_logs() -> None:
+    """Приглушаем шумные логи sentence-transformers / transformers / tqdm."""
+    import logging
+    for name in ("sentence_transformers", "sentence_transformers.SentenceTransformer",
+                 "transformers", "transformers.modeling_utils",
+                 "transformers.utils.loading_report", "huggingface_hub"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
+
+
 def get_hugginface_embedding(
     model_name: str = "sentence-transformers/all-mpnet-base-v2",
 ):
     """
     Возвращает объект для получения эмбеддингов Hugging Face.
-    :param model_name: Имя модели.
-    :return: Экземпляр эмбеддингов Hugging Face.
+    Thread-safe singleton: одна модель на имя, не грузится повторно
+    при параллельных вызовах из разных потоков.
     """
-    from langchain_huggingface import HuggingFaceEmbeddings
-
-    return HuggingFaceEmbeddings(model_name=model_name)
+    cached = _EMB_CACHE.get(model_name)
+    if cached is not None:
+        return cached
+    with _EMB_LOCK:
+        cached = _EMB_CACHE.get(model_name)
+        if cached is not None:
+            return cached
+        _silence_st_logs()
+        from langchain_huggingface import HuggingFaceEmbeddings
+        inst = HuggingFaceEmbeddings(model_name=model_name)
+        _EMB_CACHE[model_name] = inst
+        return inst

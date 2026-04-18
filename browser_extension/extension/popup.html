@@ -3,14 +3,20 @@
 <head>
   <meta charset="utf-8">
   <style>
-    body { font-family: sans-serif; padding: 12px; width: 200px; }
+    body { font-family: sans-serif; padding: 12px; width: 220px; }
+    .head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .head img { width: 28px; height: 28px; }
+    .head b { font-size: 14px; }
     #status { padding: 6px 10px; border-radius: 6px; font-size: 13px; }
     .on  { background: #dcfce7; color: #166534; }
     .off { background: #fee2e2; color: #991b1b; }
   </style>
 </head>
 <body>
-  <b>AI Assistant Bridge</b>
+  <div class="head">
+    <img src="icons/icon48.png" alt="">
+    <b>Компас Bridge</b>
+  </div>
   <div id="status" class="off">Disconnected</div>
   <script src="popup.js"></script>
 </body>

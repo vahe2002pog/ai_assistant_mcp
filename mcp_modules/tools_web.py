@@ -1,21 +1,44 @@
 from tavily import TavilyClient
 from .mcp_core import mcp
 import os
+import threading
 import urllib.parse
 from config import TAVILY_API_KEY
 
+# Singleton-клиент (иначе на каждый вызов — новый HTTP-клиент и новый пул).
+_CLIENT = None
+_CLIENT_LOCK = threading.Lock()
+# Глобальный таймаут для всех tavily-запросов (сек).
+_TAVILY_TIMEOUT = 15
+
+
+def _get_client():
+    global _CLIENT
+    if _CLIENT is not None:
+        return _CLIENT
+    with _CLIENT_LOCK:
+        if _CLIENT is None:
+            _CLIENT = TavilyClient(api_key=TAVILY_API_KEY)
+    return _CLIENT
+
+
 @mcp.tool
-def tavily_search(query: str, max_results: int = 5, search_depth: str = "advanced") -> str:
+def tavily_search(query: str, max_results: int = 3, search_depth: str = "basic") -> str:
     """
-    Выполняет поисковый запрос в интернете и возвращает релевантные, сжатые результаты, 
+    Выполняет поисковый запрос в интернете и возвращает релевантные, сжатые результаты,
     часто с фрагментами текста и ссылками.
-    Обязательно выполни tavily_extract для получения актуальных данных из сайта.
-    
+
+    Важно: обычно сниппетов из результата достаточно для ответа. Вызывай tavily_extract
+    только если сниппетов явно не хватает для конкретного факта.
+
     Args:
         query (str): Поисковый запрос.
-        max_results (int): Количество результатов (по умолчанию 5, максимум 10).
-        search_depth (str): Глубина поиска ("basic" или "advanced", по умолчанию "advanced").
-        
+        max_results (int): Количество результатов (по умолчанию 3, максимум 10).
+        search_depth (str): Глубина поиска:
+            "basic"    — быстрый поиск (1–2 сек, по умолчанию).
+            "advanced" — глубокий поиск с суммаризацией (5–15 сек, использовать только
+                         если "basic" не дал релевантных сниппетов).
+
     Returns:
         str: Текст с результатами поиска.
     """
@@ -23,9 +46,14 @@ def tavily_search(query: str, max_results: int = 5, search_depth: str = "advance
     try:
         if not TAVILY_API_KEY:
             return "Ошибка: TAVILY_API_KEY не установлен."
-        
-        client = TavilyClient(api_key=TAVILY_API_KEY)
-        response = client.search(query=query, max_results=max_results, search_depth=search_depth)
+
+        client = _get_client()
+        response = client.search(
+            query=query,
+            max_results=max_results,
+            search_depth=search_depth,
+            timeout=_TAVILY_TIMEOUT,
+        )
         
         results = []
         for r in response.get("results", []):
@@ -62,8 +90,8 @@ def tavily_extract(urls: list[str]) -> str:
         if not TAVILY_API_KEY:
             return "Ошибка: TAVILY_API_KEY не установлен."
         
-        client = TavilyClient(api_key=TAVILY_API_KEY)
-        response = client.extract(urls=urls)
+        client = _get_client()
+        response = client.extract(urls=urls, timeout=_TAVILY_TIMEOUT)
         
         results = []
         for item in response.get("results", []):
@@ -98,8 +126,12 @@ def tavily_crawl(url: str, max_requests_per_minute: int = 10) -> str:
         if not TAVILY_API_KEY:
             return "Ошибка: TAVILY_API_KEY не установлен."
         
-        client = TavilyClient(api_key=TAVILY_API_KEY)
-        response = client.crawl(url=url, max_requests_per_minute=max_requests_per_minute)
+        client = _get_client()
+        response = client.crawl(
+            url=url,
+            max_requests_per_minute=max_requests_per_minute,
+            timeout=_TAVILY_TIMEOUT * 4,
+        )
         
         results = []
         for item in response.get("results", []):
@@ -134,8 +166,8 @@ def tavily_map(url: str, max_pages: int = 100) -> str:
         if not TAVILY_API_KEY:
             return "Ошибка: TAVILY_API_KEY не установлен."
         
-        client = TavilyClient(api_key=TAVILY_API_KEY)
-        response = client.map(url=url, max_pages=max_pages)
+        client = _get_client()
+        response = client.map(url=url, max_pages=max_pages, timeout=_TAVILY_TIMEOUT * 2)
         
         results = []
         for item in response.get("results", []):

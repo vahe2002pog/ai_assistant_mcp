@@ -82,6 +82,40 @@ def _hotkey_to_pw(keys: str) -> str:
     return mods + f"{{{key_part.upper()}}}"
 
 
+def _unicode_type(text: str) -> None:
+    """Вводит произвольный Unicode-текст через SendInput + KEYEVENTF_UNICODE.
+    Не зависит от раскладки клавиатуры и активного языка ввода."""
+    import ctypes
+    from ctypes import wintypes
+
+    KEYEVENTF_KEYUP    = 0x0002
+    KEYEVENTF_UNICODE  = 0x0004
+    INPUT_KEYBOARD     = 1
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+    class _INPUT_I(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _anonymous_ = ("i",)
+        _fields_ = [("type", wintypes.DWORD), ("i", _INPUT_I)]
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    extra = ctypes.c_ulong(0)
+
+    for ch in text:
+        for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
+            inp = INPUT(type=INPUT_KEYBOARD)
+            inp.ki = KEYBDINPUT(wVk=0, wScan=ord(ch), dwFlags=flags,
+                                time=0, dwExtraInfo=ctypes.pointer(extra))
+            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+        time.sleep(0.005)
+
+
 def _type_keys_with_text(keys: str) -> None:
     """
     Разбирает строку на чередующиеся части: обычный текст и {специальные клавиши}.
@@ -90,20 +124,22 @@ def _type_keys_with_text(keys: str) -> None:
     Примеры:
         "Hello World{ENTER}" → clipboard_paste("Hello World") + send_keys("{ENTER}")
         "Ctrl+S"             → send_keys("^s")
-        "{CTRL}a{DELETE}"    → send_keys("{CTRL}a{DELETE}")
+        "Ctrl+A{DELETE}"     → send_keys("^a{DELETE}")
     """
     import re
-    import win32clipboard
+
+    # Нормализация невалидных модификаторов: {CTRL} → ^, {ALT} → %, {SHIFT} → +, {WIN} → ^{LWIN}
+    # pywinauto не понимает {CTRL}/{ALT}/{SHIFT} как модификаторы.
+    _MOD_MAP = {"{CTRL}": "^", "{ALT}": "%", "{SHIFT}": "+", "{WIN}": "^{LWIN}"}
+    for bad, good in _MOD_MAP.items():
+        keys = keys.replace(bad, good).replace(bad.lower(), good)
 
     def _paste_text(text: str) -> None:
-        """Помещает текст в буфер и вставляет через Ctrl+V."""
-        win32clipboard.OpenClipboard()
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
-        win32clipboard.CloseClipboard()
-        time.sleep(0.05)
-        _send_keys("^v")
-        time.sleep(0.05)
+        """Вводит текст через SendInput + KEYEVENTF_UNICODE. Не зависит от раскладки
+        и активного языка ввода — работает в браузерах, Electron и UWP, где
+        keybd_event-based Ctrl+V на русской раскладке доставляет Ctrl+М и не вставляет."""
+        _unicode_type(text)
+        time.sleep(0.15)
 
     # Горячая клавиша (Ctrl+A, Alt+F4, Enter, Delete...) — отправляем напрямую
     if _is_hotkey(keys):
@@ -177,10 +213,20 @@ def _snapshot(title_re: str) -> set[str]:
     """
     Возвращает множество непустых текстов всех элементов окна.
     Используется для сравнения состояния до/после действия.
+    При пустом title_re снимает активное (foreground) окно.
     """
-    if not title_re:
-        return set()
-    win = _find_win(title_re)
+    win = None
+    if title_re:
+        win = _find_win(title_re)
+    else:
+        try:
+            import win32gui
+            from pywinauto import Desktop
+            hwnd = win32gui.GetForegroundWindow()
+            if hwnd:
+                win = Desktop(backend="uia").window(handle=hwnd)
+        except Exception:
+            win = None
     if win is None:
         return set()
     texts: set[str] = set()
@@ -414,11 +460,12 @@ def ui_click_element(text: str, title_re: str = "", double: bool = False) -> str
 def ui_send_keys(keys: str, title_re: str = "") -> str:
     """
     Отправляет нажатия клавиш в окно или глобально.
-    Поддерживает специальные клавиши: {ENTER}, {TAB}, {ESC}, {CTRL}, {ALT}, {WIN}, {F1}-{F12}.
+    Поддерживает спецклавиши {ENTER}, {TAB}, {ESC}, {F1}-{F12} и модификаторы Ctrl/Alt/Shift.
     Автоматически фиксирует состояние окна до и после и сообщает об изменениях.
 
     Args:
-        keys: Строка клавиш. Пример: "Hello{ENTER}", "{CTRL}c", "{ALT}{F4}".
+        keys: Строка клавиш. Формат модификаторов — "Ctrl+N", "Alt+F4", "Ctrl+Shift+S".
+              Пример: "Hello{ENTER}", "Ctrl+C", "Alt+F4".
         title_re: Заголовок целевого окна (если пусто — текущее активное окно).
     """
     try:
@@ -429,7 +476,9 @@ def ui_send_keys(keys: str, title_re: str = "") -> str:
             if win is None:
                 return f"Окно '{title_re}' не найдено."
             win.set_focus()
-            time.sleep(0.1)
+            # Даём Windows время реально переключить keyboard-focus внутрь приложения,
+            # иначе Ctrl+V уходит в никуда / в заголовок.
+            time.sleep(0.3)
         _type_keys_with_text(keys)
 
         time.sleep(0.4)
