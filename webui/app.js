@@ -459,6 +459,7 @@ const modelPill = $("#model-pill");
 const settingsPanel = $("#settings-panel");
 const selProvider = $("#sel-provider");
 const selBase = $("#sel-base");
+const selApiKey = $("#sel-apikey");
 const selModel = $("#sel-model");
 const selModelCustom = $("#sel-model-custom");
 const refreshModelsBtn = $("#refresh-models");
@@ -484,6 +485,8 @@ async function loadConfig() {
     selProvider.innerHTML = providers.map(p => `<option value="${p.id}">${p.label}</option>`).join("");
     selProvider.value = currentCfg.provider;
     selBase.value = currentCfg.base_url;
+    selApiKey.value = "";
+    selApiKey.placeholder = currentCfg.api_key_set ? "••• ключ сохранён (введите, чтобы заменить)" : "токен провайдера";
     updatePill(currentCfg);
     await refreshModels();
   } catch (_) {}
@@ -492,13 +495,26 @@ async function loadConfig() {
 async function refreshModels() {
   selModel.innerHTML = `<option value="">(загрузка…)</option>`;
   try {
-    const r = await fetch("/api/models?base_url=" + encodeURIComponent(selBase.value));
+    let url = "/api/models?base_url=" + encodeURIComponent(selBase.value);
+    const k = selApiKey.value.trim();
+    if (k) url += "&api_key=" + encodeURIComponent(k);
+    const r = await fetch(url);
     const d = await r.json();
     const list = d.models || [];
+    const groups = d.groups;
     if (!list.length) {
       selModel.innerHTML = `<option value="">(не найдено)</option>`;
     } else {
-      selModel.innerHTML = list.map(m => `<option value="${m}">${m}</option>`).join("");
+      const esc = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+      if (groups && groups.length) {
+        selModel.innerHTML = groups.map(g =>
+          `<optgroup label="${esc(g.label)} (${g.models.length})">` +
+          g.models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("") +
+          `</optgroup>`
+        ).join("");
+      } else {
+        selModel.innerHTML = list.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+      }
       if (currentCfg && list.includes(currentCfg.model)) {
         selModel.value = currentCfg.model;
       }
@@ -511,10 +527,13 @@ async function refreshModels() {
 selProvider.addEventListener("change", () => {
   const p = providers.find(x => x.id === selProvider.value);
   if (p) selBase.value = p.base_url;
+  selApiKey.value = "";
+  selApiKey.placeholder = "токен провайдера";
   refreshModels();
 });
 refreshModelsBtn.addEventListener("click", refreshModels);
 selBase.addEventListener("change", refreshModels);
+selApiKey.addEventListener("change", refreshModels);
 
 modelPill.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -534,6 +553,8 @@ saveBtn.addEventListener("click", async () => {
     base_url: selBase.value.trim(),
     model,
   };
+  const apiKey = selApiKey.value.trim();
+  if (apiKey) body.api_key = apiKey;
   try {
     const r = await fetch("/api/config", {
       method: "POST",
@@ -544,6 +565,8 @@ saveBtn.addEventListener("click", async () => {
     currentCfg = d.config;
     updatePill(currentCfg);
     selModelCustom.value = "";
+    selApiKey.value = "";
+    selApiKey.placeholder = currentCfg.api_key_set ? "••• ключ сохранён (введите, чтобы заменить)" : "токен провайдера";
     settingsPanel.classList.add("hidden");
   } catch (err) {
     alert("Ошибка: " + err.message);

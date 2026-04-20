@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import urllib.parse
 import urllib.request
 from typing import List, Optional
 
@@ -31,6 +32,54 @@ PROVIDERS = {
         "base_url": "http://localhost:11434/v1",
         "api_key":  "ollama",
         "extra_body": {"think": False, "chat_template_kwargs": {"enable_thinking": False}},
+    },
+    "openai": {
+        "label": "OpenAI",
+        "base_url": "https://api.openai.com/v1",
+        "api_key":  "",
+        "extra_body": {},
+    },
+    "anthropic": {
+        "label": "Anthropic",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key":  "",
+        "extra_body": {},
+    },
+    "gemini": {
+        "label": "Google Gemini",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_key":  "",
+        "extra_body": {},
+    },
+    "openrouter": {
+        "label": "OpenRouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key":  "",
+        "extra_body": {},
+    },
+    "mistral": {
+        "label": "Mistral",
+        "base_url": "https://api.mistral.ai/v1",
+        "api_key":  "",
+        "extra_body": {},
+    },
+    "groq": {
+        "label": "Groq",
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key":  "",
+        "extra_body": {},
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key":  "",
+        "extra_body": {},
+    },
+    "custom": {
+        "label": "Свой (OpenAI-совместимый)",
+        "base_url": "",
+        "api_key":  "",
+        "extra_body": {},
     },
 }
 
@@ -137,24 +186,108 @@ def set_config(provider: Optional[str] = None,
         return dict(s)
 
 
-def list_models(base_url: Optional[str] = None) -> List[str]:
-    """Запрашивает у провайдера список моделей. Сначала пробует /v1/models
-    (OpenAI-совместимый эндпоинт — его поддерживают и llama.cpp, и Ollama).
-    Если не получилось — пробует ollama-native /api/tags."""
-    url = (base_url or get()["base_url"]).rstrip("/")
+def list_model_groups(base_url: Optional[str] = None,
+                      api_key: Optional[str] = None) -> Optional[List[dict]]:
+    """Для OpenRouter возвращает модели, сгруппированные по бесплатным/платным.
+    Для остальных провайдеров — None (используйте list_models)."""
+    cfg = get()
+    url = (base_url or cfg["base_url"]).rstrip("/")
+    key = api_key if api_key is not None else cfg.get("api_key", "")
+    if "openrouter.ai" not in url:
+        return None
+    headers = {"Accept": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     try:
-        with urllib.request.urlopen(url + "/models", timeout=5) as r:
+        req = urllib.request.Request(url + "/models", headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode("utf-8"))
-        items = data.get("data") or []
-        names = [it.get("id") for it in items if it.get("id")]
+    except Exception:
+        return None
+    free, paid = [], []
+    for it in data.get("data") or []:
+        mid = it.get("id")
+        if not mid:
+            continue
+        pricing = it.get("pricing") or {}
+        def _z(v):
+            try: return float(v) == 0.0
+            except Exception: return False
+        is_free = mid.endswith(":free") or (_z(pricing.get("prompt")) and _z(pricing.get("completion")))
+        (free if is_free else paid).append(mid)
+    free.sort(); paid.sort()
+    groups = []
+    if free: groups.append({"label": "Бесплатные", "models": free})
+    if paid: groups.append({"label": "Платные", "models": paid})
+    return groups or None
+
+
+def list_models(base_url: Optional[str] = None,
+                api_key: Optional[str] = None) -> List[str]:
+    """Запрашивает у провайдера список моделей.
+
+    Пробует:
+      1) OpenAI-совместимый /models (с Bearer-токеном, если задан);
+      2) Anthropic /v1/models (x-api-key + anthropic-version);
+      3) Ollama-native /api/tags.
+    """
+    cfg = get()
+    url = (base_url or cfg["base_url"]).rstrip("/")
+    key = api_key if api_key is not None else cfg.get("api_key", "")
+
+    def _fetch(u: str, headers: dict) -> Optional[dict]:
+        try:
+            req = urllib.request.Request(u, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    # 1) OpenAI-совместимый
+    headers = {"Accept": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    data = _fetch(url + "/models", headers)
+    if data:
+        items = data.get("data") or data.get("models") or []
+        names = [it.get("id") or it.get("name") for it in items if isinstance(it, dict)]
+        names = [n for n in names if n]
         if names:
             return sorted(set(names))
-    except Exception:
-        pass
+
+    # 2) Anthropic
+    if "anthropic.com" in url and key:
+        data = _fetch(url + "/models", {
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "Accept": "application/json",
+        })
+        if data:
+            items = data.get("data") or []
+            names = [it.get("id") for it in items if it.get("id")]
+            if names:
+                return sorted(set(names))
+
+    # 2b) Gemini native (generativelanguage.googleapis.com)
+    if "generativelanguage.googleapis.com" in url and key:
+        gem_host = url.split("/v1beta", 1)[0] + "/v1beta"
+        data = _fetch(gem_host + "/models?key=" + urllib.parse.quote(key),
+                      {"Accept": "application/json"})
+        if data:
+            names = []
+            for m in data.get("models") or []:
+                nm = m.get("name") or ""
+                if nm.startswith("models/"):
+                    nm = nm[len("models/"):]
+                methods = m.get("supportedGenerationMethods") or []
+                if nm and (not methods or "generateContent" in methods):
+                    names.append(nm)
+            if names:
+                return sorted(set(names))
+
+    # 3) Ollama-native
     host = url[:-3] if url.endswith("/v1") else url
-    try:
-        with urllib.request.urlopen(host + "/api/tags", timeout=5) as r:
-            data = json.loads(r.read().decode("utf-8"))
+    data = _fetch(host + "/api/tags", {"Accept": "application/json"})
+    if data:
         return sorted({m.get("name") for m in (data.get("models") or []) if m.get("name")})
-    except Exception:
-        return []
+    return []

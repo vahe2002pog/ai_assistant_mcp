@@ -2,5 +2,5 @@
   "provider": "ollama",
   "base_url": "http://localhost:11434/v1",
   "api_key": "ollama",
-  "model": "qwen3-vl:235b-cloud"
+  "model": "gpt-oss:120b-cloud"
 }

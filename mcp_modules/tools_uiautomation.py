@@ -82,6 +82,46 @@ def _hotkey_to_pw(keys: str) -> str:
     return mods + f"{{{key_part.upper()}}}"
 
 
+def _pw_to_uia(keys: str) -> str:
+    """Конвертирует pywinauto-формат send_keys в uiautomation.SendKeys.
+    '^s' → '{Ctrl}s'; '%{F4}' → '{Alt}{F4}'; '+^{HOME}' → '{Shift}{Ctrl}{Home}'.
+    Обычные символы и {NAMED} остаются без изменений."""
+    import re
+    mod_map = {"^": "{Ctrl}", "%": "{Alt}", "+": "{Shift}"}
+    out = []
+    i = 0
+    while i < len(keys):
+        ch = keys[i]
+        if ch in mod_map:
+            out.append(mod_map[ch]); i += 1; continue
+        if ch == "{":
+            j = keys.find("}", i)
+            if j == -1:
+                out.append(ch); i += 1; continue
+            token = keys[i:j+1]  # вид {ENTER}, {F4}, {LWIN}
+            inner = token[1:-1]
+            # Canonicalize regular single-word named keys to {Capitalized}
+            if re.fullmatch(r"[A-Za-z0-9]+", inner):
+                out.append("{" + inner.capitalize() + "}")
+            else:
+                out.append(token)
+            i = j + 1; continue
+        out.append(ch); i += 1
+    return "".join(out)
+
+
+def _send_hotkey(keys_pw: str) -> None:
+    """Отправляет горячую клавишу. Основной путь — uiautomation.SendKeys
+    (он же используется для текста и стабильно работает), fallback — pywinauto."""
+    try:
+        import uiautomation as _auto
+        _auto.SendKeys(_pw_to_uia(keys_pw), interval=0.04)
+        return
+    except Exception:
+        pass
+    _send_keys(keys_pw)
+
+
 def _unicode_type(text: str) -> None:
     """Вводит произвольный Unicode-текст через SendInput + KEYEVENTF_UNICODE.
     Не зависит от раскладки клавиатуры и активного языка ввода."""
@@ -163,7 +203,7 @@ def _type_keys_with_text(keys: str) -> None:
 
     # Горячая клавиша (Ctrl+A, Alt+F4, Enter, Delete...) — отправляем напрямую
     if _is_hotkey(keys):
-        _send_keys(_hotkey_to_pw(keys))
+        _send_hotkey(_hotkey_to_pw(keys))
         return
 
     # Обычный текст с возможными {SPECIAL} вставками
@@ -175,7 +215,7 @@ def _type_keys_with_text(keys: str) -> None:
             if plain_buf:
                 _paste_text(plain_buf)
                 plain_buf = ""
-            _send_keys(token)
+            _send_hotkey(token)
         else:
             plain_buf += token
     if plain_buf:
@@ -520,15 +560,23 @@ def ui_type_text(text: str, title_re: str = "", interval: float = 0.0) -> str:
         interval: Задержка между символами в секундах (по умолчанию 0).
     """
     try:
-        import pyautogui
         before = _snapshot(title_re)
 
         if title_re:
             win = _find_win(title_re)
             if win:
                 win.set_focus()
-                time.sleep(0.1)
-        pyautogui.typewrite(text, interval=interval)
+                time.sleep(0.2)
+
+        # Unicode-безопасный ввод: uiautomation.SendKeys (с экранированием {})
+        # → fallback на SendInput+KEYEVENTF_UNICODE. pyautogui.typewrite тут
+        # не годится — он режет всё не-ASCII.
+        try:
+            import uiautomation as _auto
+            safe = text.replace("{", "{{").replace("}", "}}")
+            _auto.SendKeys(safe, interval=max(interval, 0.0))
+        except Exception:
+            _unicode_type(text)
 
         time.sleep(0.4)
         after = _snapshot(title_re)

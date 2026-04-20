@@ -394,19 +394,30 @@ class Handler(BaseHTTPRequestHandler):
             cfg = _llm.get()
             providers = [{"id": k, "label": v["label"], "base_url": v["base_url"]}
                          for k, v in _llm.PROVIDERS.items()]
-            self._send_json(200, {"config": cfg, "providers": providers})
+            safe_cfg = dict(cfg)
+            safe_cfg["api_key_set"] = bool(cfg.get("api_key"))
+            safe_cfg.pop("api_key", None)
+            self._send_json(200, {"config": safe_cfg, "providers": providers})
             return
 
         if path == "/api/models":
             from ui_automation import llm_config as _llm
             qs = self.path.split("?", 1)[1] if "?" in self.path else ""
             base = None
+            api_key = None
+            import urllib.parse as _up
             for part in qs.split("&"):
                 if part.startswith("base_url="):
-                    import urllib.parse as _up
                     base = _up.unquote(part[len("base_url="):])
-            models = _llm.list_models(base_url=base)
-            self._send_json(200, {"models": models})
+                elif part.startswith("api_key="):
+                    api_key = _up.unquote(part[len("api_key="):])
+            groups = _llm.list_model_groups(base_url=base, api_key=api_key)
+            if groups:
+                flat = [m for g in groups for m in g["models"]]
+                self._send_json(200, {"models": flat, "groups": groups})
+            else:
+                models = _llm.list_models(base_url=base, api_key=api_key)
+                self._send_json(200, {"models": models})
             return
 
         if path == "/api/events":
@@ -532,8 +543,11 @@ class Handler(BaseHTTPRequestHandler):
                 base_url=req.get("base_url"),
                 api_key=req.get("api_key"),
             )
-            BROKER.emit("config_updated", cfg)
-            self._send_json(200, {"config": cfg})
+            safe_cfg = dict(cfg)
+            safe_cfg["api_key_set"] = bool(cfg.get("api_key"))
+            safe_cfg.pop("api_key", None)
+            BROKER.emit("config_updated", safe_cfg)
+            self._send_json(200, {"config": safe_cfg})
             return
 
         if path == "/api/cancel":
@@ -784,7 +798,7 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
 
         def _load_tray_image():
             from PIL import Image
-            png_path = os.path.join(_ROOT, "src", "png", "dark", "compass-dark-tiny.png")
+            png_path = os.path.join(_ROOT, "src", "png", "orange", "compass-orange-tiny.png")
             for p in (png_path, icon_path):
                 if os.path.isfile(p):
                     try:

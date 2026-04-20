@@ -80,9 +80,8 @@ button { font: inherit; color: inherit; }
 }
 .btn-new-icon {
   width: 16px; height: 16px;
-  border: 1.5px solid currentColor; border-radius: 4px;
   display: grid; place-items: center; flex-shrink: 0;
-  font-size: 13px; line-height: 0.5;
+  font-size: 16px; line-height: 1;
 }
 
 .sidebar-section {
@@ -172,12 +171,12 @@ button { font: inherit; color: inherit; }
   background: var(--bg-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
   padding: 6px 8px; font: inherit; font-size: 13px; outline: none;
+  width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
 }
+.settings-row select { text-overflow: ellipsis; }
 .settings-row select:focus, .settings-row input:focus { border-color: var(--orange); }
-.model-row { display: flex; gap: 6px; }
-.model-row select { flex: 1; }
-#sel-model, #sel-model-custom { max-width: 100%; }
-#sel-model option { max-width: 320px; }
+.model-row { display: flex; gap: 6px; min-width: 0; }
+.model-row select { flex: 1 1 0; min-width: 0; }
 
 .btn-mini {
   background: var(--bg-2); color: var(--muted); border: 1px solid var(--border);
