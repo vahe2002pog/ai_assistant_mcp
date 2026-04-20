@@ -16,3 +16,4 @@ CLAUDE.md
 src/png/*
 src/svg/*
 traces/
+.claude/*
