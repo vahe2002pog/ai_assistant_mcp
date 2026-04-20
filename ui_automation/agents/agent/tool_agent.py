@@ -85,10 +85,10 @@ def _compact_messages(messages: List[Dict],
         asst = turn[0]
         for tc in (asst.get("tool_calls") or []):
             fn = tc.get("function", {}) or {}
-            args_preview = (fn.get("arguments") or "")[:120]
+            args_preview = (fn.get("arguments") or "")
             lines.append(f"- {fn.get('name','')}({args_preview})")
         for t in turn[1:]:
-            r = str(t.get("content") or "")[:150].replace("\n", " ")
+            r = str(t.get("content") or "").replace("\n", " ")
             lines.append(f"  → {r}")
 
     summary = {
@@ -378,7 +378,7 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
                     args = {}
 
                 args_repr = ", ".join(f"{k}={v!r}" for k, v in args.items())
-                print(f"  [{fn_name}({args_repr[:100]})]", flush=True)
+                print(f"  [{fn_name}({args_repr})]", flush=True)
 
                 if fn_name == _TASK_DONE:
                     result_summary = args.get("summary", "")
@@ -392,7 +392,7 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
                     continue
 
                 result = self._call_tool(fn_name, args)
-                preview = result[:400] + ("…" if len(result) > 400 else "")
+                preview = result + ("…" if len(result) > 400 else "")
                 print(f"  → {preview}", flush=True)
 
                 # Собираем URL из выдачи поисковых инструментов (для блока «Источники»).

@@ -10,6 +10,14 @@ import openai
 
 from ui_automation import utils, llm_config as _llm
 from ui_automation.agents.memory.blackboard import Blackboard
+from ui_automation.agents.contracts import (
+    AgentType, ErrorClass, ErrorInfo, ExecutionTrace, Plan,
+    StepResult, StepSpec, StepStatus,
+)
+from ui_automation.agents.controller import Controller, Worker
+from ui_automation.agents.planner import Planner
+from ui_automation.agents.verifier import Verifier
+from ui_automation.agents.trace_store import TraceStore
 
 # ── Keyword routing tables ────────────────────────────────────────────────────
 _BROWSER_KW = (
@@ -86,7 +94,7 @@ class TaskItem:
     agents: List[str] = field(default_factory=lambda: ["chat"])
 
     def __repr__(self) -> str:
-        return f"TaskItem(agents={self.agents}, task={self.task[:60]!r})"
+        return f"TaskItem(agents={self.agents}, task={self.task})"
 
 
 class HostAgent:
@@ -105,6 +113,7 @@ class HostAgent:
         self._default_bb = Blackboard()
         self.appagent_dict: Dict = {}
         self._active_appagent = None
+        self._trace_store = TraceStore()
 
     def _get_blackboard(self, conv_id: Any = None) -> Blackboard:
         if conv_id is None:
@@ -289,7 +298,7 @@ class HostAgent:
                 if stack:
                     return stack
             except Exception as e:
-                utils.print_with_color(f"[HostAgent] plan_tasks parse error: {e} | raw={raw[:200]!r}", "yellow")
+                utils.print_with_color(f"[HostAgent] plan_tasks parse error: {e} | raw={raw}", "yellow")
 
         return [TaskItem(task=task, agents=[self.classify_task(task)])]
 
@@ -385,8 +394,8 @@ class HostAgent:
                 agent_text = d.get("agent", "")
                 if task_text:
                     lines.append(
-                        f"• [{agent_text}] {task_text[:80]}"
-                        + (f" → {result_text[:120]}" if result_text else "")
+                        f"• [{agent_text}] {task_text}"
+                        + (f" → {result_text}" if result_text else "")
                     )
             return "\n".join(lines)
         except Exception:
@@ -409,76 +418,47 @@ class HostAgent:
             context_hint = f"[История предыдущих задач]\n{bb_ctx}\n\n" + context_hint
 
         if context_hint:
-            utils.print_with_color(context_hint[:800] + ("…" if len(context_hint) > 800 else ""), "cyan")
+            utils.print_with_color(context_hint + ("…" if len(context_hint) > 800 else ""), "cyan")
 
-        stack = self._plan_tasks(task, context_hint)
-        total = len(stack)
-        utils.print_with_color(
-            f"[HostAgent] Стек ({total}): " + " → ".join(repr(s) for s in stack),
-            "magenta",
-        )
-
-        step_results: List[str] = []
-
+        # Инкрементальный ReAct: Planner генерирует шаги по ходу выполнения,
+        # смотря на реальное состояние экрана/браузера после каждого шага.
         from ui_automation import cancel as _cancel
-        for idx, item in enumerate(stack):
-            if _cancel.is_cancelled():
-                utils.print_with_color("[HostAgent] Отменено пользователем.", "yellow")
-                break
-            step_num = f"[{idx + 1}/{total}]"
+        from ui_automation.agents.perceiver import Perceiver
 
-            prev_ctx = ""
-            if step_results:
-                prev_ctx = "\n\n[Результаты предыдущих шагов]\n" + "\n".join(
-                    f"Шаг {i + 1}: {r}" for i, r in enumerate(step_results)
-                )
-
-            item_results: List[str] = []
-            for agent_type in item.agents:
-                utils.print_with_color(
-                    f"[HostAgent] {step_num} агент={agent_type} | {item.task[:80]}",
-                    "magenta",
-                )
-                full_subtask = item.task + prev_ctx
-                if context_hint:
-                    full_subtask += "\n\n" + context_hint
-
-                if agent_type == "chat":
-                    result = self._run_chat(full_subtask)
-                else:
-                    agent = self._make_agent(agent_type)
-                    self.appagent_dict[agent.name] = agent
-                    self._active_appagent = agent
-                    result = agent.execute(full_subtask)
-
-                item_results.append(result)
-                prev_ctx += f"\n[{agent_type}]: {result}"
-
-            combined = " | ".join(item_results) if item_results else ""
-            step_results.append(combined)
-
-            self._get_blackboard(conv_id).add_requests({
-                "task": item.task[:200],
-                "agent": "+".join(item.agents),
-                "result": combined[:300],
-            })
-
-        final = (
-            "\n".join(f"Шаг {i + 1}: {r}" for i, r in enumerate(step_results))
-            if len(step_results) > 1
-            else (step_results[0] if step_results else "")
+        planner = Planner()
+        perceiver = Perceiver()
+        workers = self._build_workers(context_hint)
+        controller = Controller(
+            workers=workers,
+            on_step_done=lambda r, t: self._record_blackboard(conv_id, r, t),
+            is_cancelled=_cancel.is_cancelled,
+            verifier=Verifier(),
+        )
+        trace: ExecutionTrace = controller.execute(
+            goal=task,
+            planner=planner,
+            perceiver=perceiver,
+            context_hint=context_hint,
         )
 
-        utils.print_with_color(f"\n[HostAgent] Готово:\n{final}", "green")
+        # Персистим трассу — для реплея и метрик.
+        try:
+            self._trace_store.save(trace)
+        except Exception as e:
+            utils.print_with_color(f"[HostAgent] trace save failed: {e}", "yellow")
 
-        # Сохраняем опыт в RAG в фоновом потоке (не блокируем ответ)
-        _save_experience_async(task, final, stack)
+        final = trace.final_summary or ""
+        utils.print_with_color(f"\n[HostAgent] Готово ({trace.final_status.value}):\n{final}", "green")
+
+        # Опыт в RAG — фоном, не блокируем ответ.
+        agent_types = [s.agent.value for s in trace.plan.steps]
+        _save_experience_async(task, final, agent_types)
 
         # Если задача состояла только из chat-агентов — отдаём ответ как есть,
         # без форматтера (он превратит дружелюбный текст в казённый «voice»).
-        only_chat = all(
-            all(a == "chat" for a in item.agents) for item in stack
-        ) if stack else False
+        only_chat = bool(trace.plan.steps) and all(
+            s.agent == AgentType.CHAT for s in trace.plan.steps
+        )
         if only_chat:
             from ui_automation.agents.agent.response_formatter import AssistantResponse
             response = AssistantResponse(voice=final)
@@ -490,13 +470,81 @@ class HostAgent:
         utils.print_with_color(f"[HostAgent] voice: {response.voice}", "cyan")
         return response
 
+    # ── Worker adapters (legacy sub-agents → Controller.Worker) ───────────────
 
-def _save_experience_async(task: str, result: str, stack: list) -> None:
+    def _build_workers(self, context_hint: str) -> Dict[AgentType, Worker]:
+        """Оборачивает существующие sub-agents (str→str) в Worker (StepSpec→StepResult)."""
+        def _subtask_text(step: StepSpec, prev: str) -> str:
+            text = step.parameters.get("task") or step.free_text or step.expected_outcome
+            if prev:
+                text = f"{text}{prev}"
+            if context_hint:
+                text = f"{text}\n\n{context_hint}"
+            return text
+
+        def _classify_error(msg: str) -> ErrorClass:
+            low = msg.lower()
+            if any(k in low for k in ("timeout", "connection", "connectionreset", "temporarily")):
+                return ErrorClass.TRANSIENT
+            if any(k in low for k in ("not found", "не найден", "missing")):
+                return ErrorClass.SEMANTIC
+            return ErrorClass.UNKNOWN
+
+        def _legacy_worker(agent_type_str: str) -> Worker:
+            def run(step: StepSpec, prev: str) -> StepResult:
+                import time as _t
+                started = _t.time()
+                subtask = _subtask_text(step, prev)
+                try:
+                    if agent_type_str == "chat":
+                        out = self._run_chat(subtask)
+                    else:
+                        sub = self._make_agent(agent_type_str)
+                        self.appagent_dict[sub.name] = sub
+                        self._active_appagent = sub
+                        out = sub.execute(subtask)
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.SUCCESS,
+                        summary=str(out or "").strip(),
+                        started_at=started,
+                        finished_at=_t.time(),
+                    )
+                except Exception as e:
+                    msg = str(e)
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILURE,
+                        error=ErrorInfo(
+                            error_class=_classify_error(msg),
+                            message=msg,
+                        ),
+                        started_at=started,
+                        finished_at=_t.time(),
+                    )
+            return run
+
+        return {
+            AgentType.CHAT:    _legacy_worker("chat"),
+            AgentType.WEB:     _legacy_worker("web"),
+            AgentType.SYSTEM:  _legacy_worker("system"),
+            AgentType.BROWSER: _legacy_worker("browser"),
+            AgentType.VISION:  _legacy_worker("vision"),
+        }
+
+    def _record_blackboard(self, conv_id: Any, r: StepResult, trace: ExecutionTrace) -> None:
+        step = next((s for s in trace.plan.steps if s.step_id == r.step_id), None)
+        if step is None:
+            return
+        self._get_blackboard(conv_id).add_requests({
+            "task": (step.parameters.get("task") or step.expected_outcome or ""),
+            "agent": step.agent.value,
+            "result": (r.summary or ""),
+        })
+
+
+def _save_experience_async(task: str, result: str, agent_types: list) -> None:
     """Сохраняет опыт выполнения задачи в RAG vectordb/experience (фоновый поток)."""
-    agent_types = []
-    for item in stack:
-        agent_types.extend(item.agents)
-
     def _worker():
         try:
             from ui_automation.rag.experience_manager import save_experience

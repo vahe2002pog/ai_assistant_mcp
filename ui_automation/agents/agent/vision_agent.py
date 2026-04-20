@@ -142,7 +142,7 @@ class VisionAgent(ToolAgent):
                     args = {}
 
                 args_repr = ", ".join(f"{k}={v!r}" for k, v in args.items())
-                print(f"  [{fn_name}({args_repr[:120]})]", flush=True)
+                print(f"  [{fn_name}({args_repr})]", flush=True)
 
                 if fn_name == _TASK_DONE:
                     result_summary = args.get("summary", "")

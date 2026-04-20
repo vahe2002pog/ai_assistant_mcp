@@ -216,8 +216,6 @@ def _build_chat_history(conv_id: Optional[int], skip_last_user: bool = True,
         content = (m.get("content") or "").strip()
         if not content:
             continue
-        if len(content) > 500:
-            content = content[:500] + "…"
         lines.append(f"{role}: {content}")
     text = "\n".join(lines)
     if len(text) > max_chars:
@@ -263,7 +261,7 @@ def _dispatch(message: str, conv_id: Optional[int] = None) -> dict:
                     existing.update(b.get("links") or [])
             extra = [u for u in urls if u not in existing]
             if extra:
-                blocks.append({"type": "links", "title": "Источники", "links": extra[:10]})
+                blocks.append({"type": "links", "title": "Источники", "links": extra})
         return out
     except Exception as e:
         return {"voice": f"[Ошибка] {e}", "screen": {"blocks": []}}
@@ -327,6 +325,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_src_asset(self, rel: str) -> None:
+        src_root = os.path.abspath(os.path.join(_ROOT, "src"))
+        target = os.path.abspath(os.path.join(src_root, rel.replace("/", os.sep)))
+        if not target.startswith(src_root + os.sep) and target != src_root:
+            self.send_error(403); return
+        try:
+            with open(target, "rb") as f:
+                data = f.read()
+        except (FileNotFoundError, IsADirectoryError, OSError):
+            self.send_error(404); return
+        ext = os.path.splitext(target)[1].lower()
+        ctype = {
+            ".svg": "image/svg+xml",
+            ".png": "image/png",
+            ".ico": "image/x-icon",
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".gif": "image/gif",
+        }.get(ext, "application/octet-stream")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _send_static(self, filename: str, content_type: str) -> None:
         path = os.path.normpath(os.path.join(_WEBUI_DIR, filename))
         try:
@@ -349,6 +372,10 @@ class Handler(BaseHTTPRequestHandler):
         if path in _STATIC_FILES:
             fname, ctype = _STATIC_FILES[path]
             self._send_static(fname, ctype)
+            return
+
+        if path.startswith("/src/"):
+            self._send_src_asset(path[len("/src/"):])
             return
 
         if path == "/api/info":
@@ -451,7 +478,7 @@ class Handler(BaseHTTPRequestHandler):
 
             # Create conversation if missing
             if not conv_id:
-                title = (message or "Изображение")[:60]
+                title = (message or "Изображение")
                 conv_id = _db.conv_create(title=title)
                 BROKER.emit("conv_created", {"id": conv_id, "title": title})
             elif message:
@@ -490,7 +517,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/conversations":
             req = self._read_json() or {}
-            title = (req.get("title") or "Новый чат")[:60]
+            title = (req.get("title") or "Новый чат")
             cid = _db.conv_create(title=title)
             BROKER.emit("conv_created", {"id": cid, "title": title})
             self._send_json(200, {"id": cid, "title": title})

@@ -18,7 +18,7 @@ def llama_chat(prompt: str, system: str = "", max_tokens: int = 1024, temperatur
     Returns:
         str: Ответ модели.
     """
-    print(f"Вызван llama_chat с prompt: {prompt[:80]}...")
+    print(f"Вызван llama_chat с prompt: {prompt}...")
     try:
         messages = []
         if system:
@@ -57,7 +57,7 @@ def llama_complete(prompt: str, max_tokens: int = 512, temperature: float = 0.7)
     Returns:
         str: Сгенерированное продолжение текста.
     """
-    print(f"Вызван llama_complete с prompt: {prompt[:80]}...")
+    print(f"Вызван llama_complete с prompt: {prompt}...")
     try:
         response = requests.post(
             f"{LLAMA_BASE_URL}/completion",

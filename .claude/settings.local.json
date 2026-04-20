@@ -45,7 +45,9 @@
       "Bash(pip install *)",
       "Bash(python -c \"import pystray, PIL; print\\('ok'\\)\")",
       "Bash(python -m pip install pystray)",
-      "Bash(python -c \"import web_server; print\\('ok'\\)\")"
+      "Bash(python -c \"import web_server; print\\('ok'\\)\")",
+      "Bash(python -c \"import pydantic; print\\(pydantic.VERSION\\)\")",
+      "Bash(python -c \"from ui_automation.agents.contracts import Plan, StepSpec, Target, AgentType, StepResult, ExecutionTrace; p=Plan\\(user_request='test', steps=[StepSpec\\(agent=AgentType.SYSTEM, action_type='open_app', target=Target\\(app='Notepad'\\), expected_outcome='окно блокнота открыто'\\)]\\); print\\(p.model_dump_json\\(indent=2\\)\\)\")"
     ]
   }
 }

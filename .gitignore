@@ -15,3 +15,4 @@ llm_aliases_cache.json
 CLAUDE.md
 src/png/*
 src/svg/*
+traces/

@@ -58,7 +58,7 @@ def load_json_documents(source_dir: str) -> list:
             "source": fname,
         }
         documents.append(Document(page_content=request, metadata=metadata))
-        print(f"  ✓ {fname}: {request[:60]}")
+        print(f"  ✓ {fname}: {request}")
 
     return documents
 

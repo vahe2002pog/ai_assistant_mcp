@@ -149,7 +149,7 @@ def list_directory(directory: Union[str, int]) -> str:
         files = os.listdir(path)
         result = []
 
-        for f in files[:50]:
+        for f in files:
             full = os.path.join(path, f)
             idx = cache_put(full)
             # Нормализуем путь для отображения (прямые слеши)

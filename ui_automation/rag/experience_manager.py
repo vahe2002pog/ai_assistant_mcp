@@ -36,7 +36,7 @@ def _summarize_with_llm(task: str, result: str) -> dict:
     try:
         import openai
         client = openai.OpenAI(base_url=_API_BASE, api_key=_API_KEY)
-        user_msg = f"Запрос: {task}\n\nРезультат: {result[:800]}"
+        user_msg = f"Запрос: {task}\n\nРезультат: {result}"
         resp = client.chat.completions.create(
             model=_API_MODEL,
             messages=[
@@ -57,12 +57,12 @@ def _summarize_with_llm(task: str, result: str) -> dict:
         if m:
             data = json.loads(m.group())
             return {
-                "summary": data.get("summary", result[:200]),
+                "summary": data.get("summary", result),
                 "tips": data.get("tips", []),
             }
     except Exception:
         pass
-    return {"summary": result[:200], "tips": []}
+    return {"summary": result, "tips": []}
 
 
 def save_experience(
@@ -94,7 +94,7 @@ def save_experience(
         if use_llm:
             summary_data = _summarize_with_llm(task, result)
         else:
-            summary_data = {"summary": result[:300], "tips": []}
+            summary_data = {"summary": result, "tips": []}
 
         # Формируем метаданные
         flat_agents = []

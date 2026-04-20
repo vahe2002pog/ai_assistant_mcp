@@ -137,7 +137,7 @@ def tavily_crawl(url: str, max_requests_per_minute: int = 10) -> str:
         for item in response.get("results", []):
             page_url = item.get("url", "")
             content = item.get("content", "Нет контента")
-            results.append(f"🔗 {page_url}\n📄 {content[:500]}...\n")  # Ограничим для краткости
+            results.append(f"🔗 {page_url}\n📄 {content}...\n")  # Ограничим для краткости
             
         if not results:
             return "Не удалось просканировать сайт."

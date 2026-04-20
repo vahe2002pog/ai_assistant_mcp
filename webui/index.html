@@ -7,6 +7,9 @@
     <link rel="icon" type="image/x-icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
@@ -14,10 +17,13 @@
       <aside class="sidebar">
         <div class="sidebar-header">
           <div class="logo">
-            <img class="logo-icon" src="/icon.svg" alt="" />
+            <img class="logo-mark" src="/src/svg/orange/compass-orange-default.svg" alt="Компас" />
             <span class="logo-text">Компас</span>
           </div>
-          <button id="new-chat" class="btn-new" title="Новый чат">+ Новый чат</button>
+          <button id="new-chat" class="btn-new" title="Новый чат">
+            <span class="btn-new-icon">+</span>
+            Новый чат
+          </button>
         </div>
         <div class="sidebar-section">История</div>
         <div id="history" class="history"></div>
@@ -62,6 +68,7 @@
 
         <div id="messages" class="messages">
           <div class="welcome">
+            <img class="welcome-mark" src="/src/svg/orange/compass-orange-default.svg" alt="" />
             <h1>Чем могу помочь?</h1>
             <p>Открою приложение, найду файл, что-то в интернете или управлю браузером.</p>
           </div>
@@ -69,7 +76,7 @@
 
         <div class="composer-wrap">
           <div id="status-bar" class="status-bar hidden">
-            <span class="spinner"></span>
+            <img class="spinner" src="/src/svg/compass-spin.svg" alt="" width="16" height="16" />
             <span id="status-text">Думаю…</span>
           </div>
           <form id="composer" class="composer">
@@ -96,6 +103,10 @@
       </main>
     </div>
 
+    <div id="ctx-menu" class="ctx-menu hidden" role="menu">
+      <button type="button" class="ctx-item" data-action="copy">Копировать</button>
+      <button type="button" class="ctx-item" data-action="reply">Ответить на фрагмент</button>
+    </div>
     <script src="/app.js"></script>
     <script>
       // Подгружаем мост для browser_* инструментов, только если запрошено (?bridge=1).

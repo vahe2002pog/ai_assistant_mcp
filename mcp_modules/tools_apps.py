@@ -60,7 +60,7 @@ def list_apps(query: str = "") -> str:
         return f"Приложения по запросу '{query}' не найдены." if query else "База приложений пуста."
 
     lines = [f"Найдено приложений: {len(matches)}"]
-    for name, path in matches[:20]:
+    for name, path in matches:
         lines.append(f"  - {name}: {path}")
     if len(matches) > 20:
         lines.append(f"  ... и ещё {len(matches) - 20}")

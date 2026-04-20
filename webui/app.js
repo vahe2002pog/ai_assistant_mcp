@@ -15,23 +15,24 @@ const fileInput = $("#file-input");
 const attachPreview = $("#attach-preview");
 
 let currentConvId = null;
-let busy = false;
-let inflightConvId = null; // чат, в котором сейчас выполняется запрос
+const inflightConvs = new Set();      // conv_id'шники с активным запросом
+const abortCtrls = new Map();         // conv_id → AbortController
+let pendingNewSend = null;            // { ctrl } — отправка в ещё-не-созданный чат
 let lastStatusText = "";
 let pendingImages = [];
 let lastLocalMsgKey = null; // для подавления эха из SSE
-let abortCtrl = null;
+
+function isBusyConv(id) {
+  if (id == null) return pendingNewSend != null;
+  return inflightConvs.has(id);
+}
+function isCurrentBusy() { return isBusyConv(currentConvId); }
 
 const SEND_ICON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>`;
 const STOP_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>`;
 
-function setBusy(val) {
-  busy = val;
-  refreshSendBtn();
-}
-
 function refreshSendBtn() {
-  const showStop = busy && inflightConvId === currentConvId;
+  const showStop = isCurrentBusy();
   if (showStop) {
     sendBtn.classList.add("stop");
     sendBtn.title = "Прервать";
@@ -43,6 +44,10 @@ function refreshSendBtn() {
     sendBtn.innerHTML = SEND_ICON;
     sendBtn.type = "submit";
   }
+  inputEl.disabled = showStop;
+  inputEl.placeholder = showStop
+    ? "Дождись ответа или прерви запрос…"
+    : "Напиши сообщение…";
 }
 
 function autosize() {
@@ -173,7 +178,7 @@ function setStatus(text) {
 }
 
 function applyStatus() {
-  const visible = lastStatusText && busy && inflightConvId === currentConvId;
+  const visible = lastStatusText && isCurrentBusy();
   if (!visible) { statusBar.classList.add("hidden"); return; }
   statusText.textContent = lastStatusText;
   statusBar.classList.remove("hidden");
@@ -220,9 +225,12 @@ function connectEvents() {
     try {
       const d = JSON.parse(e.data);
       // Если мы ждём conv_id для только что отправленного сообщения — усыновим его.
-      if (busy && currentConvId == null && inflightConvId == null && d.conversation_id != null) {
-        currentConvId = d.conversation_id;
-        inflightConvId = d.conversation_id;
+      if (pendingNewSend && currentConvId == null && d.conversation_id != null) {
+        const id = d.conversation_id;
+        abortCtrls.set(id, pendingNewSend.ctrl);
+        inflightConvs.add(id);
+        pendingNewSend = null;
+        currentConvId = id;
         refreshSendBtn();
         applyStatus();
         loadConversations();
@@ -270,8 +278,8 @@ function renderHistory(items) {
 
 async function openConversation(id) {
   currentConvId = id;
-  applyStatus();
   refreshSendBtn();
+  applyStatus();
   messagesEl.innerHTML = "";
   try {
     const r = await fetch(`/api/conversations/${id}/messages`);
@@ -288,8 +296,8 @@ newChatBtn.addEventListener("click", () => {
   currentConvId = null;
   messagesEl.innerHTML = "";
   showWelcome();
-  applyStatus();
   refreshSendBtn();
+  applyStatus();
   historyEl.querySelectorAll(".history-item").forEach(el => el.classList.remove("active"));
   inputEl.focus();
 });
@@ -347,10 +355,19 @@ function renderAttachPreview() {
 
 // ── Отправка ─────────────────────────────────────────────────────────
 async function send(text) {
-  if ((!text.trim() && !pendingImages.length) || busy) return;
-  inflightConvId = currentConvId;
-  setBusy(true);
-  abortCtrl = new AbortController();
+  if (!text.trim() && !pendingImages.length) return;
+  if (isCurrentBusy()) return;
+
+  const ctrl = new AbortController();
+  const sendConvId = currentConvId;     // захватываем id до await'ов
+  if (sendConvId == null) {
+    pendingNewSend = { ctrl };
+  } else {
+    inflightConvs.add(sendConvId);
+    abortCtrls.set(sendConvId, ctrl);
+  }
+  refreshSendBtn();
+
   const imgs = pendingImages.slice();
   pendingImages = [];
   renderAttachPreview();
@@ -363,52 +380,58 @@ async function send(text) {
     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      signal: abortCtrl.signal,
+      signal: ctrl.signal,
       body: JSON.stringify({
         message: text,
-        conversation_id: currentConvId,
+        conversation_id: sendConvId,
         images: imgs.map(i => i.dataUrl),
       }),
     });
     const data = await resp.json();
     if (data.error) {
       appendMessage("assistant", "[Ошибка] " + data.error);
-    } else {
-      if (data.conversation_id) {
-        if (inflightConvId == null) {
-          inflightConvId = data.conversation_id;
-          if (currentConvId == null) currentConvId = data.conversation_id;
-        }
-        loadConversations();
-      }
-      // Ответ ассистента приходит через SSE msg_added — здесь не дублируем.
+    } else if (data.conversation_id) {
+      loadConversations();
     }
   } catch (e) {
     if (e.name !== "AbortError") {
       appendMessage("assistant", "[Сетевая ошибка] " + e.message);
     }
   } finally {
+    // Вычисляем фактический id (мог прийти через SSE-adoption).
+    let finishedId = sendConvId;
+    if (finishedId == null && pendingNewSend && pendingNewSend.ctrl === ctrl) {
+      pendingNewSend = null;
+    } else if (finishedId == null) {
+      // adoption произошёл — ищем id по controller'у
+      for (const [id, c] of abortCtrls) if (c === ctrl) { finishedId = id; break; }
+    }
+    if (finishedId != null) {
+      inflightConvs.delete(finishedId);
+      abortCtrls.delete(finishedId);
+    }
     setStatus("");
-    setBusy(false);
-    inflightConvId = null;
-    abortCtrl = null;
-    inputEl.focus();
+    refreshSendBtn();
+    applyStatus();
+    if (!inputEl.disabled) inputEl.focus();
   }
 }
 
 async function cancelRequest() {
+  const id = currentConvId;
+  const ctrl = id != null ? abortCtrls.get(id) : pendingNewSend?.ctrl;
   try {
     await fetch("/api/cancel", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversation_id: inflightConvId ?? currentConvId }),
+      body: JSON.stringify({ conversation_id: id }),
     });
   } catch (_) {}
-  try { if (abortCtrl) abortCtrl.abort(); } catch (_) {}
+  try { if (ctrl) ctrl.abort(); } catch (_) {}
 }
 
 sendBtn.addEventListener("click", (e) => {
-  if (busy) {
+  if (isCurrentBusy()) {
     e.preventDefault();
     cancelRequest();
   }
@@ -416,6 +439,7 @@ sendBtn.addEventListener("click", (e) => {
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
+  if (isCurrentBusy()) return;
   const text = inputEl.value.trim();
   if (!text && !pendingImages.length) return;
   inputEl.value = "";
@@ -528,3 +552,94 @@ saveBtn.addEventListener("click", async () => {
 
 loadConfig();
 loadConversations();
+
+// ── Контекстное меню для сообщений ──────────────────────────────────
+const ctxMenu = $("#ctx-menu");
+let ctxTarget = null;    // .msg element
+let ctxSelection = "";   // выделенный текст
+let ctxFull = "";        // полный текст сообщения
+
+function getMsgText(msgEl) {
+  const c = msgEl.querySelector(".content");
+  return c ? c.textContent || "" : "";
+}
+
+function openCtxMenu(x, y) {
+  ctxMenu.classList.remove("hidden");
+  const { innerWidth: W, innerHeight: H } = window;
+  const rect = ctxMenu.getBoundingClientRect();
+  const left = Math.min(x, W - rect.width - 4);
+  const top = Math.min(y, H - rect.height - 4);
+  ctxMenu.style.left = left + "px";
+  ctxMenu.style.top = top + "px";
+}
+
+function closeCtxMenu() {
+  ctxMenu.classList.add("hidden");
+  ctxTarget = null;
+  ctxSelection = "";
+  ctxFull = "";
+}
+
+messagesEl.addEventListener("contextmenu", (e) => {
+  const msg = e.target.closest(".msg");
+  if (!msg) return;
+  e.preventDefault();
+  ctxTarget = msg;
+  ctxFull = getMsgText(msg);
+  const sel = window.getSelection();
+  const selText = sel && !sel.isCollapsed && msg.contains(sel.anchorNode)
+    ? sel.toString() : "";
+  ctxSelection = selText;
+
+  const copyBtn = ctxMenu.querySelector('[data-action="copy"]');
+  const replyBtn = ctxMenu.querySelector('[data-action="reply"]');
+  copyBtn.textContent = selText ? "Копировать выделенное" : "Копировать сообщение";
+  copyBtn.disabled = !(selText || ctxFull);
+  replyBtn.disabled = !(selText || ctxFull);
+  replyBtn.textContent = selText ? "Ответить на фрагмент" : "Ответить на сообщение";
+
+  openCtxMenu(e.clientX, e.clientY);
+});
+
+ctxMenu.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".ctx-item");
+  if (!btn || btn.disabled) return;
+  const action = btn.dataset.action;
+  const text = ctxSelection || ctxFull;
+
+  if (action === "copy") {
+    try { await navigator.clipboard.writeText(text); }
+    catch (_) {
+      const ta = document.createElement("textarea");
+      ta.value = text; document.body.appendChild(ta);
+      ta.select(); try { document.execCommand("copy"); } catch (_) {}
+      ta.remove();
+    }
+  } else if (action === "reply") {
+    const quoted = text.split("\n").map(l => "> " + l).join("\n");
+    const prefix = inputEl.value && !inputEl.value.endsWith("\n") ? "\n" : "";
+    inputEl.value = (inputEl.value || "") + prefix + quoted + "\n\n";
+    inputEl.focus();
+    inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+    autosize();
+  }
+  closeCtxMenu();
+});
+
+function insertAtCursor(ta, str) {
+  const s = ta.selectionStart ?? ta.value.length;
+  const e = ta.selectionEnd ?? ta.value.length;
+  ta.value = ta.value.slice(0, s) + str + ta.value.slice(e);
+  const pos = s + str.length;
+  ta.setSelectionRange(pos, pos);
+}
+
+document.addEventListener("click", (e) => {
+  if (!ctxMenu.contains(e.target)) closeCtxMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeCtxMenu();
+});
+window.addEventListener("resize", closeCtxMenu);
+messagesEl.addEventListener("scroll", closeCtxMenu);

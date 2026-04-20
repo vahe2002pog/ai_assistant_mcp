@@ -172,7 +172,7 @@ class ResponseFormatter:
         except json.JSONDecodeError:
             return self._fallback(raw)
 
-        voice = str(data.get("voice", raw[:80])).strip()
+        voice = str(data.get("voice", raw)).strip()
         screen_data = data.get("screen", {})
         raw_blocks = screen_data.get("blocks", []) if isinstance(screen_data, dict) else []
 
@@ -226,7 +226,7 @@ class ResponseFormatter:
     def _fallback(self, raw: str) -> AssistantResponse:
         """Минимальный fallback без LLM — берём первое предложение как voice."""
         sentence = re.split(r"[.!?\n]", raw.strip())[0].strip()
-        voice = sentence[:120] if sentence else raw[:120]
+        voice = sentence if sentence else raw
 
         # Эвристика: если результат длинный — показываем как text-блок
         blocks: List[Block] = []

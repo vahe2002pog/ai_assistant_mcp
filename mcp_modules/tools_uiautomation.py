@@ -135,9 +135,29 @@ def _type_keys_with_text(keys: str) -> None:
         keys = keys.replace(bad, good).replace(bad.lower(), good)
 
     def _paste_text(text: str) -> None:
-        """Вводит текст через SendInput + KEYEVENTF_UNICODE. Не зависит от раскладки
-        и активного языка ввода — работает в браузерах, Electron и UWP, где
-        keybd_event-based Ctrl+V на русской раскладке доставляет Ctrl+М и не вставляет."""
+        """Вводит текст посимвольно через uiautomation.SendKeys (стабильно работает
+        в Word/Office и большинстве Win32-приложений; этот путь ранее работал
+        надёжно, в отличие от SendInput+KEYEVENTF_UNICODE, который в Word иногда
+        глотается). Для не-ASCII символов, которые SendKeys не может набрать
+        виртуальными клавишами, делаем fallback на SendInput+UNICODE.
+        """
+        try:
+            import uiautomation as _auto
+        except Exception:
+            _auto = None
+
+        if _auto is not None:
+            try:
+                # В uiautomation фигурные скобки — синтаксис спецклавиш.
+                # Для чистого текста экранируем их.
+                safe = text.replace("{", "{{").replace("}", "}}")
+                _auto.SendKeys(safe, interval=0.05)
+                time.sleep(0.15)
+                return
+            except Exception:
+                pass
+
+        # Fallback: SendInput + KEYEVENTF_UNICODE.
         _unicode_type(text)
         time.sleep(0.15)
 
@@ -260,10 +280,10 @@ def _diff_report(before: set[str], after: set[str], action_desc: str) -> str:
     else:
         if added:
             lines.append("Появилось:")
-            lines.extend(f"  + {t}" for t in added[:20])
+            lines.extend(f"  + {t}" for t in added)
         if removed:
             lines.append("Исчезло:")
-            lines.extend(f"  - {t}" for t in removed[:20])
+            lines.extend(f"  - {t}" for t in removed)
     return "\n".join(lines)
 
 
@@ -653,7 +673,7 @@ def ui_wait_for_window(title_re: str, timeout: int = 20) -> str:
     # Последняя попытка: показать все открытые окна для диагностики
     try:
         titles = [w.window_text() for w in _all_windows() if w.window_text()]
-        hint = ", ".join(f"'{t}'" for t in titles[:8])
+        hint = ", ".join(f"'{t}'" for t in titles)
     except Exception:
         hint = "не удалось получить список окон"
     return f"Таймаут {timeout}с: окно '{title_re}' не найдено. Открытые окна: {hint}"
