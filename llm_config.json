@@ -1,6 +1,8 @@
 {
-  "provider": "ollama",
-  "base_url": "http://localhost:11434/v1",
-  "api_key": "ollama",
-  "model": "gpt-oss:120b-cloud"
+  "provider": "deepseek",
+  "base_url": "https://api.deepseek.com/v1",
+  "model": "deepseek-chat",
+  "vision_model": "qwen3-vl:235b-cloud",
+  "vision_provider": "ollama",
+  "vision_base_url": "http://localhost:11434/v1"
 }

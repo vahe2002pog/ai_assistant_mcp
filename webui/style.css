@@ -6,8 +6,8 @@
   --ink:       #0a0a0a;
   --radius:    8px;
   --font:      "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system,
-               BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --mono:      "IBM Plex Mono", ui-monospace, Consolas, "Courier New", monospace;
+               BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Color Emoji", sans-serif;
+  --mono:      "IBM Plex Mono", ui-monospace, Consolas, "Courier New", "Noto Color Emoji", monospace;
 }
 
 .dark {
@@ -164,6 +164,9 @@ button { font: inherit; color: inherit; }
   box-shadow: 0 6px 24px rgba(0,0,0,0.45);
 }
 .settings-panel.hidden { display: none; }
+.settings-row.hidden, #vision-block.hidden { display: none; }
+.settings-row.settings-section { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.settings-row.settings-section label { color: var(--text); font-size: 11px; }
 .settings-row { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .settings-row label { color: var(--muted); font-family: var(--mono); font-size: 10px;
   letter-spacing: 0.1em; text-transform: uppercase; }
@@ -444,6 +447,70 @@ span.spinner {
   background: rgba(0,0,0,0.7); color: #fff; cursor: pointer;
   font-size: 12px; line-height: 16px; padding: 0;
 }
+.quote-chip {
+  display: flex; align-items: stretch; gap: 8px;
+  padding: 6px 8px; margin-bottom: 6px;
+  background: var(--bg-2, rgba(127,127,127,0.08));
+  border-left: 3px solid var(--accent, #5b8cff);
+  border-radius: 6px;
+  max-width: 100%;
+}
+.quote-chip.hidden { display: none; }
+.quote-chip-body { flex: 1; min-width: 0; }
+.quote-chip-label {
+  font-size: 11px; font-weight: 600; opacity: 0.7;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+.quote-chip-text {
+  font-size: 12px; line-height: 1.35; opacity: 0.85;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 4.2em; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical;
+}
+.quote-chip-rm {
+  align-self: flex-start;
+  width: 20px; height: 20px; border-radius: 50%; border: 0;
+  background: rgba(0,0,0,0.25); color: #fff; cursor: pointer;
+  font-size: 14px; line-height: 18px; padding: 0;
+}
+.preview-doc {
+  width: auto; min-width: 120px; max-width: 220px; height: 40px;
+  padding: 4px 22px 4px 4px;
+  display: flex; align-items: center; gap: 6px;
+  background: var(--bg-2, rgba(127,127,127,0.08));
+}
+.preview-doc-ic {
+  flex: 0 0 auto; width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent, #5b8cff); color: #fff;
+  font-size: 10px; font-weight: 700; border-radius: 4px;
+}
+.preview-doc-name {
+  font-size: 12px; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1; min-width: 0;
+}
+.attach-doc {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 10px 6px 6px;
+  background: var(--bg-2, rgba(127,127,127,0.08));
+  border: 1px solid var(--border, rgba(127,127,127,0.25));
+  border-radius: 8px; text-decoration: none; color: inherit;
+  max-width: 260px;
+}
+.attach-doc:hover { background: var(--bg-3, rgba(127,127,127,0.15)); }
+.attach-doc-ic {
+  flex: 0 0 auto; width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent, #5b8cff); color: #fff;
+  font-size: 10px; font-weight: 700; border-radius: 6px;
+}
+.attach-doc-name {
+  font-size: 13px; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
 .attach-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .attach-thumb {
   max-width: 220px; max-height: 220px;
@@ -468,7 +535,133 @@ span.spinner {
 .ctx-item:hover:not(:disabled) { background: var(--border); }
 .ctx-item:disabled { color: var(--muted); cursor: default; }
 
+/* ── Хранилище (Сценарии / Документы) ─────────────────────────── */
+.btn-new.btn-vault {
+  background: var(--orange); color: #000;
+  border-color: var(--orange);
+}
+.btn-new.btn-vault:hover {
+  background: #ff8338; border-color: #ff8338; color: #000;
+}
+.btn-new.btn-vault .btn-new-icon { color: #000; }
+
+.vault-modal {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+}
+.vault-modal.hidden { display: none; }
+.vault-backdrop {
+  position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6);
+}
+.vault-panel {
+  position: relative; z-index: 1;
+  width: min(1100px, 94vw); height: min(720px, 88vh);
+  background: var(--card); border: 1px solid var(--border-2);
+  border-radius: 10px; display: flex; flex-direction: column;
+  overflow: hidden; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.vault-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.vault-tabs { display: flex; gap: 4px; }
+.vault-tab {
+  padding: 7px 14px; border: 1px solid transparent;
+  background: transparent; color: var(--muted);
+  border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px;
+}
+.vault-tab:hover { color: var(--text); }
+.vault-tab.active {
+  color: var(--orange); border-color: var(--orange);
+  background: var(--accent-weak);
+}
+.vault-close {
+  background: transparent; color: var(--muted);
+  border: none; font-size: 22px; line-height: 1; cursor: pointer;
+  width: 28px; height: 28px; border-radius: 4px;
+}
+.vault-close:hover { color: var(--text); background: var(--border); }
+
+.vault-body {
+  flex: 1; display: grid; grid-template-columns: 360px 1fr;
+  min-height: 0;
+}
+.vault-body.hidden { display: none; }
+.vault-list-col {
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.vault-toolbar {
+  padding: 10px; border-bottom: 1px solid var(--border);
+  display: flex; gap: 8px; align-items: center;
+}
+.vault-list {
+  flex: 1; overflow-y: auto; padding: 6px;
+}
+.vault-empty {
+  padding: 20px; color: var(--muted); font-size: 13px; text-align: center;
+}
+.vault-row {
+  padding: 10px 12px; border-radius: 6px; cursor: pointer;
+  border: 1px solid transparent; margin-bottom: 4px;
+}
+.vault-row:hover { background: var(--bg-2); }
+.vault-row.active {
+  background: var(--accent-weak); border-color: var(--orange);
+}
+.vault-row-title { font-weight: 500; margin-bottom: 4px; font-size: 13px; }
+.vault-row-chips { margin-bottom: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+.vault-row-chips .chip {
+  font-size: 11px; padding: 2px 7px; border-radius: 99px;
+  background: var(--border); color: var(--text);
+}
+.vault-row-meta { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+.vault-row-preview {
+  color: var(--muted); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.vault-edit-col { padding: 16px 20px; overflow-y: auto; }
+.vault-form { display: flex; flex-direction: column; gap: 12px; }
+.vault-form label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; color: var(--muted);
+}
+.vault-form input, .vault-form textarea {
+  padding: 8px 10px; background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  font: inherit; font-size: 13px;
+}
+.vault-form textarea { font-family: var(--mono); resize: vertical; }
+.vault-form input:focus, .vault-form textarea:focus {
+  outline: none; border-color: var(--orange);
+}
+.vault-actions { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.vault-status { color: var(--muted); font-size: 12px; }
+
+.btn-danger {
+  padding: 7px 12px; background: transparent;
+  color: #e55; border: 1px solid #a33; border-radius: 5px;
+  cursor: pointer; font: inherit; font-size: 12px;
+}
+.btn-danger:hover { background: rgba(255, 60, 60, 0.1); }
+
+.vault-upload-btn { cursor: pointer; display: inline-block; }
+
+.vault-doc-detail { display: flex; flex-direction: column; gap: 12px; }
+.vault-doc-head h3 { margin: 0 0 6px; }
+.vault-doc-meta { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.vault-doc-meta code { font-family: var(--mono); font-size: 11px; }
+.vault-doc-body {
+  font-family: var(--mono); font-size: 12px;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 12px; white-space: pre-wrap; word-break: break-word;
+  max-height: 480px; overflow-y: auto;
+}
+
 /* ── Responsive ─────────────────────────────────────────────────── */
 @media (max-width: 720px) {
   .sidebar { display: none; }
+  .vault-body { grid-template-columns: 1fr; }
 }

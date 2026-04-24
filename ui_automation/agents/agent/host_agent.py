@@ -16,6 +16,7 @@ from ui_automation.agents.controller import Controller, Worker
 from ui_automation.agents.planner import Planner
 from ui_automation.agents.verifier import Verifier
 from ui_automation.agents.trace_store import TraceStore
+from ui_automation.agents.agent.tool_agent import _strip_task_done_mentions as _strip_task_done
 
 # Web-инструменты HostAgent использует сам, без отдельного подагента.
 _WEB_TOOLS_MODULES = ["mcp_modules.tools_web", "mcp_modules.tools_weather"]
@@ -116,10 +117,10 @@ class HostAgent:
                 msg = resp.choices[0].message
                 text = (msg.content or "").strip()
                 if text:
-                    return text
+                    return _strip_task_done(text)
                 reasoning = getattr(msg, "reasoning_content", None) or ""
                 if reasoning.strip():
-                    return reasoning.strip()
+                    return _strip_task_done(reasoning.strip())
             except openai.APIConnectionError:
                 return "Ошибка: нет соединения с моделью."
             except Exception as e:
@@ -153,7 +154,8 @@ class HostAgent:
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
-    def dispatch(self, task: str, context_hint: str = "", conv_id: Any = None) -> str:
+    def dispatch(self, task: str, context_hint: str = "", conv_id: Any = None,
+                 chat_history: str = "") -> str:
         """
         Main entry point for chat-mode requests.
 
@@ -166,6 +168,11 @@ class HostAgent:
         bb_ctx = self._blackboard_context(conv_id)
         if bb_ctx:
             context_hint = f"[История предыдущих задач]\n{bb_ctx}\n\n" + context_hint
+
+        # chat_history отдельным параметром идёт в Planner; для worker'ов подклеиваем
+        # его в context_hint, чтобы chat-агент видел предыдущие реплики.
+        if chat_history:
+            context_hint = f"[История текущего чата]\n{chat_history}\n\n" + (context_hint or "")
 
         if context_hint:
             utils.print_with_color(context_hint + ("…" if len(context_hint) > 800 else ""), "cyan")
@@ -189,6 +196,7 @@ class HostAgent:
             planner=planner,
             perceiver=perceiver,
             context_hint=context_hint,
+            chat_history=chat_history,
         )
 
         # Персистим трассу — для реплея и метрик.
@@ -218,12 +226,28 @@ class HostAgent:
                 if r.status == StepStatus.SUCCESS and r.summary
             ]
             voice_text = "\n\n".join(chat_answers) if chat_answers else final
+            voice_text = _strip_task_done(voice_text)
             response = AssistantResponse(voice=voice_text)
             utils.print_with_color(f"[HostAgent] voice: {response.voice}", "cyan")
             return response
 
+        # Планировщик в DoneMarker часто пишет короткое summary и теряет
+        # фактический развёрнутый ответ воркера (таблицы, перечни фактов).
+        # Если среди успешных шагов есть результат существенно богаче, чем final —
+        # скармливаем форматтеру именно его.
+        step_texts = [
+            r.summary for r in trace.step_results
+            if r.status == StepStatus.SUCCESS and r.summary
+        ]
+        raw_for_formatter = final
+        if step_texts:
+            best = max(step_texts, key=len)
+            if len(best) > max(len(final) * 2, len(final) + 200):
+                raw_for_formatter = best
+
         from ui_automation.agents.agent.response_formatter import ResponseFormatter
-        response = ResponseFormatter().format(final, user_query=task)
+        raw_for_formatter = _strip_task_done(raw_for_formatter)
+        response = ResponseFormatter().format(raw_for_formatter, user_query=task)
         utils.print_with_color(f"[HostAgent] voice: {response.voice}", "cyan")
         return response
 

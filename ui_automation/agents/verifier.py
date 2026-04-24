@@ -63,8 +63,8 @@ class Verifier:
             f"Сообщение исполнителя: {result.summary}"
         )
         try:
-            resp = _llm.get_client().chat.completions.create(
-                model=_llm.get_model(),
+            resp = _llm.get_vision_client().chat.completions.create(
+                model=_llm.get_vision_model(),
                 messages=[
                     {"role": "system", "content": _VERIFY_SYSTEM},
                     {"role": "user", "content": [
@@ -75,7 +75,7 @@ class Verifier:
                 ],
                 temperature=0.0,
                 max_tokens=200,
-                extra_body=_llm.get_extra_body(),
+                extra_body=_llm.get_vision_extra_body(),
                 response_format={"type": "json_object"},
             )
             raw = (resp.choices[0].message.content or "").strip()

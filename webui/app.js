@@ -20,6 +20,28 @@ const abortCtrls = new Map();         // conv_id → AbortController
 let pendingNewSend = null;            // { ctrl } — отправка в ещё-не-созданный чат
 let lastStatusText = "";
 let pendingImages = [];
+let pendingDocs = [];
+let pendingQuote = "";
+
+const quoteChip = document.getElementById("quote-chip");
+const quoteChipText = document.getElementById("quote-chip-text");
+const quoteChipRm = document.getElementById("quote-chip-rm");
+
+function setPendingQuote(text) {
+  pendingQuote = (text || "").trim();
+  if (quoteChip) {
+    if (pendingQuote) {
+      quoteChipText.textContent = pendingQuote;
+      quoteChip.classList.remove("hidden");
+    } else {
+      quoteChipText.textContent = "";
+      quoteChip.classList.add("hidden");
+    }
+  }
+}
+if (quoteChipRm) {
+  quoteChipRm.addEventListener("click", () => setPendingQuote(""));
+}
 let lastLocalMsgKey = null; // для подавления эха из SSE
 
 function isBusyConv(id) {
@@ -88,15 +110,30 @@ function appendMessage(role, text, response = null, attachments = []) {
       <div class="content"></div>
     </div>`;
   const content = msg.querySelector(".content");
-  if (text) content.textContent = text;
-  else content.style.display = "none";
+  if (text) {
+    if (role === "assistant") content.innerHTML = renderMarkdown(text);
+    else content.textContent = text;
+  } else content.style.display = "none";
   const body = msg.querySelector(".body");
   if (attachments && attachments.length) {
     const row = el("div", "attach-row");
     attachments.forEach(a => {
-      const img = document.createElement("img");
-      img.src = a.url; img.className = "attach-thumb"; img.alt = a.name || "";
-      row.appendChild(img);
+      const isDoc = a.kind === "doc" || (a.mime && !String(a.mime).startsWith("image/"))
+                    || (a.url && !/^data:image\/|\.(png|jpe?g|gif|webp|bmp)(\?|$)/i.test(a.url));
+      if (isDoc) {
+        const chip = el("a", "attach-doc");
+        chip.href = a.url; chip.target = "_blank"; chip.rel = "noopener";
+        const ic = el("div", "attach-doc-ic");
+        ic.textContent = ((a.name || "file").split(".").pop() || "FILE").slice(0, 5).toUpperCase();
+        const nm = el("div", "attach-doc-name");
+        nm.textContent = a.name || "файл";
+        chip.appendChild(ic); chip.appendChild(nm);
+        row.appendChild(chip);
+      } else {
+        const img = document.createElement("img");
+        img.src = a.url; img.className = "attach-thumb"; img.alt = a.name || "";
+        row.appendChild(img);
+      }
     });
     body.insertBefore(row, content);
   }
@@ -124,12 +161,20 @@ function renderBlock(b) {
   const box = el("div", "block block-" + (b.type || "text"));
   if (b.title) box.appendChild(el("div", "block-title", b.title));
   switch (b.type) {
-    case "text":
-      box.appendChild(el("div", "block-text", b.text || ""));
+    case "text": {
+      const tx = document.createElement("div");
+      tx.className = "block-text";
+      tx.innerHTML = renderMarkdown(b.text || "");
+      box.appendChild(tx);
       break;
+    }
     case "list": {
       const ul = el("ul", "block-list");
-      (b.items || []).forEach(i => ul.appendChild(el("li", "", String(i))));
+      (b.items || []).forEach(i => {
+        const li = el("li");
+        li.innerHTML = inlineMarkdown(String(i));
+        ul.appendChild(li);
+      });
       box.appendChild(ul);
       break;
     }
@@ -141,12 +186,20 @@ function renderBlock(b) {
       }, new Set()));
       const table = el("table", "block-table");
       const thead = el("thead"); const trh = el("tr");
-      cols.forEach(c => trh.appendChild(el("th", "", c)));
+      cols.forEach(c => {
+        const th = el("th");
+        th.innerHTML = inlineMarkdown(String(c));
+        trh.appendChild(th);
+      });
       thead.appendChild(trh); table.appendChild(thead);
       const tbody = el("tbody");
       rows.forEach(r => {
         const tr = el("tr");
-        cols.forEach(c => tr.appendChild(el("td", "", r[c] !== undefined ? String(r[c]) : "")));
+        cols.forEach(c => {
+          const td = el("td");
+          td.innerHTML = inlineMarkdown(r[c] !== undefined ? String(r[c]) : "");
+          tr.appendChild(td);
+        });
         tbody.appendChild(tr);
       });
       table.appendChild(tbody); box.appendChild(table);
@@ -170,6 +223,128 @@ function renderBlock(b) {
     default: return null;
   }
   return box;
+}
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]
+  ));
+}
+
+function inlineMarkdown(src) {
+  let s = escHtml(src);
+  s = s.replace(/`([^`\n]+)`/g, (_, x) => `<code>${x}</code>`);
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    (_, t, u) => `<a href="${u}" target="_blank" rel="noopener">${t}</a>`);
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  s = s.replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
+  s = s.replace(/(^|[\s(])(https?:\/\/[^\s<]+)/g,
+    (_, pre, u) => `${pre}<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+  return s;
+}
+
+function renderMarkdown(src) {
+  const esc = escHtml;
+  const lines = String(src).split("\n");
+  const out = [];
+  let i = 0;
+
+  const inline = (s) => {
+    // inline code
+    s = s.replace(/`([^`\n]+)`/g, (_, x) => `<code>${esc(x)}</code>`);
+    // links [text](url)
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      (_, t, u) => `<a href="${u}" target="_blank" rel="noopener">${esc(t)}</a>`);
+    // bold **x** / __x__
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+    // italic *x* / _x_  (не цепляем ** — они уже ушли)
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+    s = s.replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
+    // autolink «голых» http(s)
+    s = s.replace(/(^|[\s(])(https?:\/\/[^\s<]+)/g,
+      (_, pre, u) => `${pre}<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+    return s;
+  };
+
+  while (i < lines.length) {
+    let line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) { out.push(""); i++; continue; }
+
+    // Fenced code ```lang ... ```
+    const fence = trimmed.match(/^```(\w*)\s*$/);
+    if (fence) {
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i].trim())) {
+        buf.push(lines[i]); i++;
+      }
+      if (i < lines.length) i++;
+      out.push(`<pre><code>${esc(buf.join("\n"))}</code></pre>`);
+      continue;
+    }
+
+    // GFM tables: | col | col | ... с разделителем |---|---|
+    const isTableRow = (s) => /^\s*\|.*\|\s*$/.test(s);
+    const isTableSep = (s) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(s);
+    if (isTableRow(line) && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      const splitRow = (s) => s.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      const header = splitRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && isTableRow(lines[i])) { rows.push(splitRow(lines[i])); i++; }
+      const th = header.map(c => `<th>${inline(esc(c))}</th>`).join("");
+      const trs = rows.map(r =>
+        "<tr>" + r.map(c => `<td>${inline(esc(c))}</td>`).join("") + "</tr>"
+      ).join("");
+      out.push(`<table class="md-table"><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`);
+      continue;
+    }
+
+    // Headings: #, ##, ###
+    const h = trimmed.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const lvl = h[1].length;
+      out.push(`<h${lvl}>${inline(esc(h[2]))}</h${lvl}>`);
+      i++; continue;
+    }
+
+    // Bullet list
+    if (/^[-*•]\s+/.test(trimmed)) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*•]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[-*•]\s+/, ""));
+        i++;
+      }
+      out.push("<ul>" + items.map(x => `<li>${inline(esc(x))}</li>`).join("") + "</ul>");
+      continue;
+    }
+
+    // Ordered list
+    if (/^\d+[.)]\s+/.test(trimmed)) {
+      const items = [];
+      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*\d+[.)]\s+/, ""));
+        i++;
+      }
+      out.push("<ol>" + items.map(x => `<li>${inline(esc(x))}</li>`).join("") + "</ol>");
+      continue;
+    }
+
+    // Paragraph — собираем подряд идущие непустые не-спец строки
+    const buf = [];
+    while (i < lines.length && lines[i].trim()
+           && !/^(#{1,6}\s|[-*•]\s|\d+[.)]\s)/.test(lines[i].trim())) {
+      buf.push(lines[i]);
+      i++;
+    }
+    out.push(`<p>${buf.map(x => inline(esc(x))).join("<br>")}</p>`);
+  }
+  return out.join("");
 }
 
 function setStatus(text) {
@@ -304,16 +479,24 @@ newChatBtn.addEventListener("click", () => {
 
 // ── Изображения ──────────────────────────────────────────────────────
 attachBtn.addEventListener("click", () => fileInput.click());
+const MAX_DOC_SIZE = 20 * 1024 * 1024; // 20 MB
 fileInput.addEventListener("change", async (e) => {
   const files = Array.from(e.target.files || []);
   for (const f of files) {
-    if (!f.type.startsWith("image/")) continue;
     const dataUrl = await new Promise(res => {
       const r = new FileReader();
       r.onload = () => res(r.result);
       r.readAsDataURL(f);
     });
-    pendingImages.push({ dataUrl, name: f.name });
+    if (f.type.startsWith("image/")) {
+      pendingImages.push({ dataUrl, name: f.name });
+    } else {
+      if (f.size > MAX_DOC_SIZE) {
+        alert(`Файл "${f.name}" больше 20 МБ и не будет прикреплён.`);
+        continue;
+      }
+      pendingDocs.push({ dataUrl, name: f.name, mime: f.type || "", size: f.size });
+    }
   }
   renderAttachPreview();
   fileInput.value = "";
@@ -350,12 +533,29 @@ function renderAttachPreview() {
     box.appendChild(i); box.appendChild(rm);
     attachPreview.appendChild(box);
   });
-  attachPreview.classList.toggle("empty", pendingImages.length === 0);
+  pendingDocs.forEach((doc, idx) => {
+    const box = el("div", "preview-item preview-doc");
+    box.title = `${doc.name} (${Math.round(doc.size / 1024)} КБ)`;
+    const ic = el("div", "preview-doc-ic");
+    ic.textContent = (doc.name.split(".").pop() || "FILE").slice(0, 5).toUpperCase();
+    const nm = el("div", "preview-doc-name");
+    nm.textContent = doc.name;
+    const rm = el("button", "preview-rm", "×");
+    rm.type = "button";
+    rm.addEventListener("click", () => {
+      pendingDocs.splice(idx, 1);
+      renderAttachPreview();
+    });
+    box.appendChild(ic); box.appendChild(nm); box.appendChild(rm);
+    attachPreview.appendChild(box);
+  });
+  attachPreview.classList.toggle("empty",
+    pendingImages.length === 0 && pendingDocs.length === 0);
 }
 
 // ── Отправка ─────────────────────────────────────────────────────────
 async function send(text) {
-  if (!text.trim() && !pendingImages.length) return;
+  if (!text.trim() && !pendingImages.length && !pendingDocs.length) return;
   if (isCurrentBusy()) return;
 
   const ctrl = new AbortController();
@@ -369,10 +569,16 @@ async function send(text) {
   refreshSendBtn();
 
   const imgs = pendingImages.slice();
+  const docs = pendingDocs.slice();
   pendingImages = [];
+  pendingDocs = [];
   renderAttachPreview();
 
-  appendMessage("user", text, null, imgs.map(i => ({ url: i.dataUrl, name: i.name })));
+  const previewAtt = [
+    ...imgs.map(i => ({ url: i.dataUrl, name: i.name })),
+    ...docs.map(d => ({ url: d.dataUrl, name: d.name, mime: d.mime, kind: "doc" })),
+  ];
+  appendMessage("user", text, null, previewAtt);
   lastLocalMsgKey = `user|${(text || "").slice(0, 80)}`;
   setStatus("Думаю…");
 
@@ -385,6 +591,7 @@ async function send(text) {
         message: text,
         conversation_id: sendConvId,
         images: imgs.map(i => i.dataUrl),
+        documents: docs.map(d => ({ dataUrl: d.dataUrl, name: d.name, mime: d.mime })),
       }),
     });
     const data = await resp.json();
@@ -441,10 +648,18 @@ form.addEventListener("submit", (e) => {
   e.preventDefault();
   if (isCurrentBusy()) return;
   const text = inputEl.value.trim();
-  if (!text && !pendingImages.length) return;
+  if (!text && !pendingImages.length && !pendingDocs.length && !pendingQuote) return;
+  const quote = pendingQuote;
+  setPendingQuote("");
   inputEl.value = "";
   autosize();
-  send(text);
+  let payload = text;
+  if (quote) {
+    const header = "[Цитата пользователя — это справочный текст, не цель действий]";
+    const footer = "[/Цитата]";
+    payload = `${header}\n${quote}\n${footer}\n\n${text}`.trim();
+  }
+  send(payload);
 });
 
 inputEl.addEventListener("keydown", (e) => {
@@ -459,9 +674,30 @@ const modelPill = $("#model-pill");
 const settingsPanel = $("#settings-panel");
 const selProvider = $("#sel-provider");
 const selBase = $("#sel-base");
+const selFolder = $("#sel-folder");
+const folderRow = $("#folder-row");
 const selApiKey = $("#sel-apikey");
+
+function updateFolderVisibility() {
+  folderRow.classList.toggle("hidden", selProvider.value !== "yandex");
+}
 const selModel = $("#sel-model");
 const selModelCustom = $("#sel-model-custom");
+const selVisionProvider = $("#sel-vision-provider");
+const selVisionBase = $("#sel-vision-base");
+const selVisionApiKey = $("#sel-vision-apikey");
+const selVisionModel = $("#sel-vision-model");
+const selVisionModelCustom = $("#sel-vision-model-custom");
+const visionBaseRow = $("#vision-base-row");
+const visionApiKeyRow = $("#vision-apikey-row");
+const refreshVisionModelsBtn = $("#refresh-vision-models");
+
+function updateVisionProviderRowsVisibility() {
+  // Пусто = "как основной" — прячем base/key.
+  const isCustom = !!selVisionProvider.value;
+  visionBaseRow.classList.toggle("hidden", !isCustom);
+  visionApiKeyRow.classList.toggle("hidden", !isCustom);
+}
 const refreshModelsBtn = $("#refresh-models");
 const saveBtn = $("#settings-save");
 const cancelBtn = $("#settings-cancel");
@@ -482,45 +718,102 @@ async function loadConfig() {
     const d = await r.json();
     providers = d.providers || [];
     currentCfg = d.config;
-    selProvider.innerHTML = providers.map(p => `<option value="${p.id}">${p.label}</option>`).join("");
+    const provOpts = providers.map(p => `<option value="${p.id}">${p.label}</option>`).join("");
+    selProvider.innerHTML = provOpts;
     selProvider.value = currentCfg.provider;
     selBase.value = currentCfg.base_url;
+    selFolder.value = currentCfg.folder || "";
+    updateFolderVisibility();
     selApiKey.value = "";
     selApiKey.placeholder = currentCfg.api_key_set ? "••• ключ сохранён (введите, чтобы заменить)" : "токен провайдера";
+
+    // Vision: "" = использовать основной; иначе один из providers.
+    selVisionProvider.innerHTML =
+      `<option value="">(как основной)</option>` + provOpts;
+    selVisionProvider.value = currentCfg.vision_provider || "";
+    selVisionBase.value = currentCfg.vision_base_url
+      || (currentCfg.vision_provider
+          ? (providers.find(p => p.id === currentCfg.vision_provider) || {}).base_url || ""
+          : "");
+    selVisionApiKey.value = "";
+    selVisionApiKey.placeholder = currentCfg.vision_api_key_set
+      ? "••• ключ сохранён (введите, чтобы заменить)"
+      : "токен провайдера";
+    updateVisionProviderRowsVisibility();
+
     updatePill(currentCfg);
     await refreshModels();
+    await refreshVisionModels();
   } catch (_) {}
+}
+
+const _escHtml = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+const _normModel = (m) => typeof m === "string" ? { id: m, vision: false } : { id: m.id, vision: !!m.vision };
+const _renderOpt = (m) => {
+  const x = _normModel(m);
+  const badge = x.vision ? " 🖼" : "";
+  const title = x.vision ? "поддерживает изображения" : "только текст";
+  return `<option value="${_escHtml(x.id)}" title="${title}">${_escHtml(x.id)}${badge}</option>`;
+};
+
+async function _fetchModels(baseUrl, apiKey) {
+  let url = "/api/models?base_url=" + encodeURIComponent(baseUrl);
+  if (apiKey) url += "&api_key=" + encodeURIComponent(apiKey);
+  const r = await fetch(url);
+  return r.json();
 }
 
 async function refreshModels() {
   selModel.innerHTML = `<option value="">(загрузка…)</option>`;
   try {
-    let url = "/api/models?base_url=" + encodeURIComponent(selBase.value);
-    const k = selApiKey.value.trim();
-    if (k) url += "&api_key=" + encodeURIComponent(k);
-    const r = await fetch(url);
-    const d = await r.json();
+    const d = await _fetchModels(selBase.value, selApiKey.value.trim());
     const list = d.models || [];
     const groups = d.groups;
     if (!list.length) {
       selModel.innerHTML = `<option value="">(не найдено)</option>`;
+      return;
+    }
+    if (groups && groups.length) {
+      selModel.innerHTML = groups.map(g =>
+        `<optgroup label="${_escHtml(g.label)} (${g.models.length})">` +
+        g.models.map(_renderOpt).join("") +
+        `</optgroup>`
+      ).join("");
     } else {
-      const esc = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
-      if (groups && groups.length) {
-        selModel.innerHTML = groups.map(g =>
-          `<optgroup label="${esc(g.label)} (${g.models.length})">` +
-          g.models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("") +
-          `</optgroup>`
-        ).join("");
-      } else {
-        selModel.innerHTML = list.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
-      }
-      if (currentCfg && list.includes(currentCfg.model)) {
-        selModel.value = currentCfg.model;
-      }
+      selModel.innerHTML = list.map(_renderOpt).join("");
+    }
+    const ids = list.map(m => _normModel(m).id);
+    if (currentCfg && ids.includes(currentCfg.model)) {
+      selModel.value = currentCfg.model;
     }
   } catch (_) {
     selModel.innerHTML = `<option value="">(ошибка)</option>`;
+  }
+}
+
+async function refreshVisionModels() {
+  selVisionModel.innerHTML = `<option value="">(загрузка…)</option>`;
+  try {
+    // Если vision-провайдер не выбран — берём модели основного (с его base/key).
+    const useCustom = !!selVisionProvider.value;
+    const base = useCustom ? selVisionBase.value : selBase.value;
+    const key = useCustom ? selVisionApiKey.value.trim() : selApiKey.value.trim();
+    const d = await _fetchModels(base, key);
+    const list = (d.models || []).map(_normModel);
+    // Только vision-модели.
+    const visionOnly = list.filter(x => x.vision);
+    if (!visionOnly.length) {
+      selVisionModel.innerHTML = `<option value="">(нет vision-моделей)</option>`;
+    } else {
+      selVisionModel.innerHTML = `<option value="">(не выбрана — использовать основную)</option>`
+        + visionOnly.map(_renderOpt).join("");
+    }
+    if (currentCfg) {
+      const vids = visionOnly.map(x => x.id);
+      selVisionModel.value = vids.includes(currentCfg.vision_model) ? currentCfg.vision_model : "";
+    }
+  } catch (_) {
+    selVisionModel.innerHTML = `<option value="">(ошибка)</option>`;
   }
 }
 
@@ -528,12 +821,38 @@ selProvider.addEventListener("change", () => {
   const p = providers.find(x => x.id === selProvider.value);
   if (p) selBase.value = p.base_url;
   selApiKey.value = "";
-  selApiKey.placeholder = "токен провайдера";
+  selApiKey.placeholder = (p && p.api_key_set)
+    ? "••• ключ сохранён (введите, чтобы заменить)"
+    : "токен провайдера";
+  updateFolderVisibility();
   refreshModels();
 });
 refreshModelsBtn.addEventListener("click", refreshModels);
 selBase.addEventListener("change", refreshModels);
-selApiKey.addEventListener("change", refreshModels);
+selApiKey.addEventListener("change", () => {
+  refreshModels();
+  // Если vision использует основной провайдер — его модели тоже могут пересортироваться.
+  if (!selVisionProvider.value) refreshVisionModels();
+});
+
+selVisionProvider.addEventListener("change", () => {
+  const vp = selVisionProvider.value;
+  if (vp) {
+    const p = providers.find(x => x.id === vp);
+    if (p) selVisionBase.value = p.base_url;
+    selVisionApiKey.value = "";
+    selVisionApiKey.placeholder = (p && p.api_key_set)
+      ? "••• ключ сохранён (введите, чтобы заменить)"
+      : "токен провайдера";
+  } else {
+    selVisionBase.value = "";
+  }
+  updateVisionProviderRowsVisibility();
+  refreshVisionModels();
+});
+selVisionBase.addEventListener("change", refreshVisionModels);
+selVisionApiKey.addEventListener("change", refreshVisionModels);
+refreshVisionModelsBtn.addEventListener("click", refreshVisionModels);
 
 modelPill.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -548,13 +867,20 @@ cancelBtn.addEventListener("click", () => settingsPanel.classList.add("hidden"))
 
 saveBtn.addEventListener("click", async () => {
   const model = (selModelCustom.value.trim() || selModel.value || "").trim();
+  const visionModel = (selVisionModelCustom.value.trim() || selVisionModel.value || "").trim();
   const body = {
     provider: selProvider.value,
     base_url: selBase.value.trim(),
     model,
+    vision_model: visionModel,
+    folder: selFolder.value.trim(),
+    vision_provider: selVisionProvider.value,
+    vision_base_url: selVisionProvider.value ? selVisionBase.value.trim() : "",
   };
   const apiKey = selApiKey.value.trim();
   if (apiKey) body.api_key = apiKey;
+  const visionApiKey = selVisionApiKey.value.trim();
+  if (visionApiKey && selVisionProvider.value) body.vision_api_key = visionApiKey;
   try {
     const r = await fetch("/api/config", {
       method: "POST",
@@ -563,9 +889,18 @@ saveBtn.addEventListener("click", async () => {
     });
     const d = await r.json();
     currentCfg = d.config;
+    if (apiKey) {
+      const p = providers.find(x => x.id === currentCfg.provider);
+      if (p) p.api_key_set = true;
+    }
     updatePill(currentCfg);
     selModelCustom.value = "";
+    selVisionModelCustom.value = "";
     selApiKey.value = "";
+    selVisionApiKey.value = "";
+    selVisionApiKey.placeholder = currentCfg.vision_api_key_set
+      ? "••• ключ сохранён (введите, чтобы заменить)"
+      : "токен провайдера";
     selApiKey.placeholder = currentCfg.api_key_set ? "••• ключ сохранён (введите, чтобы заменить)" : "токен провайдера";
     settingsPanel.classList.add("hidden");
   } catch (err) {
@@ -640,12 +975,8 @@ ctxMenu.addEventListener("click", async (e) => {
       ta.remove();
     }
   } else if (action === "reply") {
-    const quoted = text.split("\n").map(l => "> " + l).join("\n");
-    const prefix = inputEl.value && !inputEl.value.endsWith("\n") ? "\n" : "";
-    inputEl.value = (inputEl.value || "") + prefix + quoted + "\n\n";
+    setPendingQuote(text);
     inputEl.focus();
-    inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
-    autosize();
   }
   closeCtxMenu();
 });

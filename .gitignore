@@ -18,3 +18,10 @@ src/svg/*
 traces/
 .claude/*
 TODO
+webui/app.js
+attachments/*
+vault/*
+vba_corpus.jsonl
+js.py
+rag_gen.py
+vba_corpus.json

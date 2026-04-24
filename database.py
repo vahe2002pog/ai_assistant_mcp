@@ -2,7 +2,46 @@ import os
 import sqlite3
 import time
 import json
-from typing import Dict, Optional
+import base64
+from typing import Dict, Optional, Tuple
+
+try:
+    import win32crypt  # из pywin32
+    _HAS_DPAPI = True
+except Exception:
+    _HAS_DPAPI = False
+
+
+_DPAPI_ENTROPY = b"ai_assistant_mcp:provider_keys:v1"
+
+
+def _encrypt_secret(plaintext: str) -> str:
+    """Шифрует строку через Windows DPAPI (привязка к текущему пользователю).
+    Возвращает base64-строку. На не-Windows возвращает base64 без шифрования
+    (проект таргетится на Windows; фолбэк нужен лишь чтобы не падать в тестах)."""
+    if not plaintext:
+        return ""
+    data = plaintext.encode("utf-8")
+    if _HAS_DPAPI:
+        blob = win32crypt.CryptProtectData(data, None, _DPAPI_ENTROPY, None, None, 0)
+        return "dpapi:" + base64.b64encode(blob).decode("ascii")
+    return "plain:" + base64.b64encode(data).decode("ascii")
+
+
+def _decrypt_secret(token: str) -> str:
+    if not token:
+        return ""
+    try:
+        kind, _, payload = token.partition(":")
+        raw = base64.b64decode(payload.encode("ascii"))
+        if kind == "dpapi" and _HAS_DPAPI:
+            _, data = win32crypt.CryptUnprotectData(raw, _DPAPI_ENTROPY, None, None, 0)
+            return data.decode("utf-8")
+        if kind == "plain":
+            return raw.decode("utf-8")
+    except Exception:
+        pass
+    return ""
 
 MAX_CACHE = 200
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -95,6 +134,14 @@ def _init_db() -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, id)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS provider_keys (
+                provider TEXT PRIMARY KEY,
+                api_key_enc TEXT NOT NULL DEFAULT '',
+                folder TEXT NOT NULL DEFAULT '',
+                updated_ts INTEGER NOT NULL
+            )
+        """)
         try:
             conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
         except Exception:
@@ -517,5 +564,78 @@ def msg_list(conv_id: int) -> list:
             }
             for r in cur.fetchall()
         ]
+    finally:
+        conn.close()
+
+
+# ── Provider API keys (DPAPI-encrypted) ─────────────────────────────────────
+
+def provider_key_set(provider: str, api_key: Optional[str] = None,
+                     folder: Optional[str] = None) -> None:
+    """Сохраняет api_key (шифруется DPAPI) и folder для провайдера.
+    Пустые/None поля не затирают существующие значения."""
+    if not provider:
+        return
+    ts = int(time.time())
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT api_key_enc, folder FROM provider_keys WHERE provider=?",
+            (provider,),
+        )
+        row = cur.fetchone()
+        cur_enc = row[0] if row else ""
+        cur_folder = row[1] if row else ""
+        new_enc = _encrypt_secret(api_key) if api_key else cur_enc
+        new_folder = folder if folder is not None else cur_folder
+        conn.execute(
+            "INSERT INTO provider_keys (provider, api_key_enc, folder, updated_ts) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(provider) DO UPDATE SET "
+            "api_key_enc=excluded.api_key_enc, folder=excluded.folder, updated_ts=excluded.updated_ts",
+            (provider, new_enc, new_folder, ts),
+        )
+    finally:
+        conn.close()
+
+
+def provider_key_get(provider: str) -> Tuple[str, str]:
+    """Возвращает (api_key, folder) для провайдера. Пустые строки, если ничего нет."""
+    if not provider:
+        return "", ""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT api_key_enc, folder FROM provider_keys WHERE provider=?",
+            (provider,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return "", ""
+        return _decrypt_secret(row[0] or ""), (row[1] or "")
+    finally:
+        conn.close()
+
+
+def provider_key_has(provider: str) -> bool:
+    if not provider:
+        return False
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT 1 FROM provider_keys WHERE provider=? AND api_key_enc<>''",
+            (provider,),
+        )
+        return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def provider_key_delete(provider: str) -> None:
+    if not provider:
+        return
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM provider_keys WHERE provider=?", (provider,))
     finally:
         conn.close()

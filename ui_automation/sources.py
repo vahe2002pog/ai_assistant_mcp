@@ -10,6 +10,9 @@ from typing import List
 from urllib.parse import urlparse
 
 _URL_RE = re.compile(r"https?://[^\s<>\"'\)\]]+", re.IGNORECASE)
+# Главные ссылки tavily_* всегда префиксируются «🔗 ». Если маркеры есть в тексте —
+# берём только их, иначе попадёт мусор из тела страниц (кросс-ссылки в wiki и т.п.).
+_MARKER_URL_RE = re.compile(r"🔗\s*(https?://[^\s<>\"'\)\]]+)", re.IGNORECASE)
 _TRAIL_PUNCT = ".,;:!?\u2026"
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)+$", re.IGNORECASE)
 
@@ -55,7 +58,9 @@ def add_from_text(text: str) -> None:
     if seen is None:
         seen = set(); _local.seen = seen
     lst = _get_list()
-    for raw in _URL_RE.findall(text):
+    marked = _MARKER_URL_RE.findall(text)
+    candidates = marked if marked else _URL_RE.findall(text)
+    for raw in candidates:
         url = raw.rstrip(_TRAIL_PUNCT)
         if url in seen:
             continue

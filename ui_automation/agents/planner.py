@@ -39,14 +39,28 @@ _NEXT_STEP_PROMPT = """/no_think
   — если нужно ещё действие.
 
 АГЕНТЫ (шаг отдаётся агенту целиком — он сам выберет tool):
-  system  — Windows: приложения, окна, файлы, медиа, UIA вне браузера.
+  system  — Windows: приложения, окна, файлы, медиа, UIA вне браузера,
+            + MS Office (Excel/Word/PowerPoint/Outlook) через COM.
     tools: open_app(name), ui_list_windows, ui_focus_window, ui_wait_for_window,
            ui_click_element(text), ui_click(x,y), ui_send_keys(keys),
            ui_list_interactive, ui_get_text, ui_screenshot,
            read_file, write_file, list_directory, delete_file, copy_file, move_file,
-           control_volume, control_media.
+           control_volume, control_media,
+           office_launch/quit/visible, excel_*, word_*, ppt_*, outlook_*,
+           office_run_python (универсальный COM-exec).
     ⇒ «открой/запусти приложение X» — ОДИН шаг к system с task="Открой X".
        НЕ расписывай «Пуск → имя → Enter» — у system есть open_app.
+    ⇒ ЗАДАЧИ С MS OFFICE-ФАЙЛАМИ (Excel/Word/PowerPoint/Outlook) решаются
+       ЧЕРЕЗ COM, а НЕ через UI-автоматизацию. Это значит:
+         • НЕ нужен open_app + ui_focus_window + клики/send_keys для
+           редактирования документа — COM-тул делает всё напрямую.
+         • «Запиши 42 в A1 файла report.xlsx» — ОДИН шаг к system
+           (task="Запиши 42 в A1 report.xlsx"). Не разбивай на
+           «открой Excel» → «кликни A1» → «введи 42».
+         • «Отправь письмо X с темой Y» — ОДИН шаг к system (outlook_send_mail).
+         • «Прочитай лист 'Итоги' из foo.xlsx» — ОДИН шаг (excel_read_sheet).
+         • Только если пользователь ЯВНО требует открытое окно приложения
+           («открой Excel», «покажи файл»), тогда первый шаг — open_app.
   browser — веб-браузер: вкладки, DOM, формы, навигация, клики по элементам страницы.
   web     — Tavily-поиск в интернете и погода. ИСПОЛЬЗУЙ всегда, когда:
             • нужна актуальная информация (новости, цены, курсы, расписания,
@@ -70,7 +84,15 @@ _NEXT_STEP_PROMPT = """/no_think
             Если есть хоть малейшее сомнение в актуальности факта — выбирай web.
 
 ПРАВИЛА:
-- Один шаг = одна высокоуровневая задача для агента.
+- Один шаг = ОДНО атомарное действие агента + ОДНА проверка результата.
+  Агент внутри шага имеет жёсткий лимит tool_call'ов (~6), поэтому крупные
+  составные задачи он не потянет — ты обязан разбивать их здесь.
+- ЗАПРЕЩЕНО склеивать действия в одном task. Плохо: «открой Excel и введи
+  данные в A1». Хорошо: сначала {"task":"Открой Excel",...}, на следующей
+  итерации, увидев открытое окно, — {"task":"Введи '42' в ячейку A1",...}.
+- Глаголы-индикаторы составного шага (должны быть разделены): «и», «затем»,
+  «после чего», «а потом», «заполни форму» (это N отдельных шагов),
+  «настрой X» (это серия шагов). Одно предложение = одно действие.
 - task — чистое описание действия, БЕЗ метаданных контекста.
 - СНАЧАЛА смотри [foreground] и дерево элементов в восприятии. Шаг должен
   ИСХОДИТЬ из того, что реально видно.
@@ -89,7 +111,10 @@ _NEXT_STEP_PROMPT = """/no_think
   после которого DONE; ответ пользователя придёт в следующем запросе.
 - ОДИН chat-шаг = ОДИН полный ответ. Не разбивай ответ на несколько chat-шагов.
 
-Цель пользователя:
+История диалога (предыдущие сообщения в этом чате):
+{chat_history}
+
+Цель пользователя (текущее сообщение):
 {goal}
 
 История шагов ({history_len}):
@@ -124,8 +149,13 @@ class Planner:
         history: List[StepSpec],
         results: List[StepResult],
         perception: str,
+        chat_history: str = "",
     ) -> "StepSpec | DoneMarker":
-        """Выдаёт СЛЕДУЮЩИЙ шаг на основе цели, истории и актуального восприятия."""
+        """Выдаёт СЛЕДУЮЩИЙ шаг на основе цели, истории и актуального восприятия.
+
+        chat_history — текст предыдущих сообщений в чате (user/assistant), чтобы
+        планировщик понимал контекст диалога, а не только последнее сообщение.
+        """
         history_block = self._format_history(history, results)
         prompt = (
             _NEXT_STEP_PROMPT
@@ -133,6 +163,7 @@ class Planner:
             .replace("{history_len}", str(len(history)))
             .replace("{history}", history_block or "(пусто)")
             .replace("{perception}", perception or "(нет данных)")
+            .replace("{chat_history}", chat_history.strip() or "(пусто)")
         )
 
         try:
@@ -146,6 +177,10 @@ class Planner:
         try:
             o_s, o_e = raw.find("{"), raw.rfind("}") + 1
             obj = json.loads(raw[o_s:o_e]) if o_s != -1 else {}
+            if (isinstance(obj, dict)
+                    and set(obj.keys()) <= {"type", "content"}
+                    and isinstance(obj.get("content"), dict)):
+                obj = obj["content"]
         except Exception as e:
             utils.print_with_color(
                 f"[Planner.next_step] parse error: {e} | raw={raw}", "yellow"

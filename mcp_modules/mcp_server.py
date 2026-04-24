@@ -35,6 +35,7 @@ import mcp_modules.tools_media         # MediaAgent
 import mcp_modules.tools_browser       # BrowserAgent
 import mcp_modules.tools_uiautomation  # UIAgent (заменяет mcp_uiautomation)
 import mcp_modules.tools_llama         # LlamaAgent (llama.cpp без указания модели)
+import mcp_modules.tools_office        # OfficeAgent (Excel/Word/PowerPoint/Outlook через COM)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

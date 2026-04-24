@@ -65,14 +65,28 @@ function stopKeepAlive() {
   }
 }
 
+async function getActiveTab() {
+  // lastFocused окно — то, в котором пользователь реально работает.
+  // currentWindow в MV3 service worker ненадёжен: возвращает случайное Chrome-окно.
+  try {
+    const win = await chrome.windows.getLastFocused({ windowTypes: ["normal"], populate: true });
+    if (win && win.tabs) {
+      const active = win.tabs.find(t => t.active);
+      if (active) return { tab: active, windowId: win.id, tabs: win.tabs };
+    }
+  } catch {}
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tabs = tab ? await chrome.tabs.query({ windowId: tab.windowId }) : [];
+  return { tab, windowId: tab && tab.windowId, tabs };
+}
+
 async function handleCommand(msg) {
   const { command, params } = msg;
 
   switch (command) {
 
     case "get_state": {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      const tabs = await chrome.tabs.query({ currentWindow: true });
+      const { tab, tabs } = await getActiveTab();
       const elements = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: getInteractiveElements,
@@ -93,46 +107,76 @@ async function handleCommand(msg) {
     }
 
     case "navigate": {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const { tab } = await getActiveTab();
       await chrome.tabs.update(tab.id, { url: params.url });
       await waitForLoad(tab.id);
       return { ok: true };
     }
 
     case "click": {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const { tab } = await getActiveTab();
       const res = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+        target: { tabId: tab.id, allFrames: true },
         func: (index) => {
           const el = document.querySelector(`[data-mcp-index="${index}"]`);
-          if (el) { el.click(); return true; }
-          return false;
+          if (!el) return false;
+          el.scrollIntoView({ block: "center", inline: "center" });
+          const rect = el.getBoundingClientRect();
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 };
+          try { el.focus({ preventScroll: true }); } catch {}
+          el.dispatchEvent(new PointerEvent("pointerdown", opts));
+          el.dispatchEvent(new MouseEvent("mousedown", opts));
+          el.dispatchEvent(new PointerEvent("pointerup", opts));
+          el.dispatchEvent(new MouseEvent("mouseup", opts));
+          el.dispatchEvent(new MouseEvent("click", opts));
+          return true;
         },
         args: [params.index],
       });
-      return { ok: res[0].result };
+      return { ok: res.some(r => r.result) };
     }
 
     case "input_text": {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+      const { tab } = await getActiveTab();
+      const res = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
         func: (index, text) => {
           const el = document.querySelector(`[data-mcp-index="${index}"]`);
           if (!el) return false;
-          el.focus();
-          el.value = text;
+          el.scrollIntoView({ block: "center" });
+          try { el.focus({ preventScroll: true }); } catch {}
+
+          // contenteditable (Gmail, Notion, etc.)
+          if (el.isContentEditable) {
+            el.textContent = "";
+            document.execCommand && document.execCommand("insertText", false, text);
+            if (el.textContent !== text) {
+              el.textContent = text;
+              el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+            }
+            return true;
+          }
+
+          // native input/textarea — обходим React value tracker
+          const proto = el instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+          if (setter) setter.call(el, text);
+          else el.value = text;
           el.dispatchEvent(new Event("input", { bubbles: true }));
           el.dispatchEvent(new Event("change", { bubbles: true }));
           return true;
         },
         args: [params.index, params.text],
       });
-      return { ok: true };
+      return { ok: res.some(r => r.result) };
     }
 
     case "extract_content": {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const { tab } = await getActiveTab();
       const res = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => document.body.innerText,
@@ -141,7 +185,7 @@ async function handleCommand(msg) {
     }
 
     case "scroll": {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const { tab } = await getActiveTab();
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: (amount) => window.scrollBy(0, amount),
@@ -151,7 +195,7 @@ async function handleCommand(msg) {
     }
 
     case "go_back": {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const { tab } = await getActiveTab();
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => history.back(),
@@ -160,12 +204,46 @@ async function handleCommand(msg) {
     }
 
     case "send_keys": {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const { tab } = await getActiveTab();
       await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: (key) => document.activeElement.dispatchEvent(
-          new KeyboardEvent("keydown", { key, bubbles: true })
-        ),
+        target: { tabId: tab.id, allFrames: true },
+        func: (keys) => {
+          // поддержка сочетаний "Ctrl+Enter", "Shift+Tab"
+          const parts = String(keys).split("+").map(s => s.trim());
+          const key = parts.pop();
+          const mods = {
+            ctrlKey: parts.some(p => /^(ctrl|control)$/i.test(p)),
+            shiftKey: parts.some(p => /^shift$/i.test(p)),
+            altKey: parts.some(p => /^alt$/i.test(p)),
+            metaKey: parts.some(p => /^(meta|cmd|command|win)$/i.test(p)),
+          };
+          const keyMap = { Space: " ", Spacebar: " " };
+          const k = keyMap[key] || key;
+          const codeMap = {
+            Enter: "Enter", Tab: "Tab", Escape: "Escape", Esc: "Escape",
+            Backspace: "Backspace", Delete: "Delete",
+            ArrowUp: "ArrowUp", ArrowDown: "ArrowDown",
+            ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight",
+            " ": "Space",
+          };
+          const code = codeMap[k] || (k.length === 1 ? "Key" + k.toUpperCase() : k);
+          const target = document.activeElement && document.activeElement !== document.body
+            ? document.activeElement
+            : document.body;
+          const opts = { key: k, code, bubbles: true, cancelable: true, composed: true, ...mods };
+          target.dispatchEvent(new KeyboardEvent("keydown", opts));
+          target.dispatchEvent(new KeyboardEvent("keypress", opts));
+
+          // для Enter в input/textarea — submit form если keydown не отменили
+          if (k === "Enter" && !mods.ctrlKey && !mods.shiftKey && !mods.altKey) {
+            const form = target.form;
+            if (form && typeof form.requestSubmit === "function") {
+              try { form.requestSubmit(); } catch { form.submit && form.submit(); }
+            }
+          }
+          target.dispatchEvent(new KeyboardEvent("keyup", opts));
+          return true;
+        },
         args: [params.keys],
       });
       return { ok: true };
@@ -182,7 +260,7 @@ async function handleCommand(msg) {
     }
 
     case "close_tab": {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const { tab } = await getActiveTab();
       await chrome.tabs.remove(tab.id);
       return { ok: true };
     }

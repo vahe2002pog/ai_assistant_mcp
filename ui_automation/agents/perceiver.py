@@ -183,7 +183,7 @@ class Perceiver:
         except Exception:
             return ""
         try:
-            res = _send_sync("getState", {}, timeout=8.0) or {}
+            res = _send_sync("get_state", {}, timeout=8.0) or {}
             if isinstance(res, dict):
                 state = res.get("state", res)
                 import json

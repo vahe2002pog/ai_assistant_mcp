@@ -58,6 +58,7 @@ class Controller:
         perceiver,
         budget_steps: int = 15,
         context_hint: str = "",
+        chat_history: str = "",
     ) -> ExecutionTrace:
         """ReAct-loop: восприятие → планирование → действие → верификация → повтор.
 
@@ -98,6 +99,7 @@ class Controller:
                 history=plan.steps,
                 results=trace.step_results,
                 perception=perception,
+                chat_history=chat_history,
             )
             if isinstance(next_item, DoneMarker):
                 trace.final_status = StepStatus.SUCCESS
@@ -142,6 +144,12 @@ class Controller:
 
             if result.summary:
                 prev_summaries.append(result.summary)
+
+            if (step.agent == AgentType.CHAT
+                    and result.status == StepStatus.SUCCESS):
+                trace.final_status = StepStatus.SUCCESS
+                trace.final_summary = result.summary or ""
+                break
 
             # 5. Accounting.
             if result.status == StepStatus.SUCCESS:

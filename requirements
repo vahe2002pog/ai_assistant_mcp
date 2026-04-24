@@ -25,17 +25,21 @@ pycaw>=20240210
 
 # ── Vision & Images ──────────────────────────────────────────────────────────
 Pillow>=10.3.0
-#gradio-client>=1.7.1          # OmniParser service client
+pymupdf>=1.24.0
+pystray>=0.19.5
+pywebview>=5.0
+
+# ── Document Extraction ──────────────────────────────────────────────────────
+pypdf>=4.0.0
+python-docx>=1.1.0
+openpyxl>=3.1.2
+python-pptx>=0.6.23
 
 # ── Vector Search / RAG ──────────────────────────────────────────────────────
 faiss-cpu>=1.8.0
 sentence-transformers>=2.5.1
 
 # ── Data Processing ──────────────────────────────────────────────────────────
-lxml>=5.1.0
-beautifulsoup4>=4.12.3
-html2text>=2024.2.26
-pandas>=1.5.3
 psutil>=5.9.8
 
 # ── MCP ──────────────────────────────────────────────────────────────────────

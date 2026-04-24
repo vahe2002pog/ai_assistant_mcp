@@ -115,6 +115,9 @@ _FORMAT_SYSTEM = """/no_think
 - Используй list для перечислений, table для табличных данных, links для URL, files для путей к файлам.
 - Не дублируй voice в блоках экрана.
 - Если результат — простое подтверждение (сделано, открыто, запущено), blocks = [].
+- ВАЖНО: не теряй содержимое. Если в сыром результате есть факты, таблицы, перечисления,
+  ссылки — они должны попасть в blocks целиком. Нельзя сокращать или выбрасывать данные;
+  переформатируй в подходящие блоки (list/table/links/text), но сохраняй всё.
 """
 
 
@@ -127,6 +130,8 @@ class ResponseFormatter:
         pass
 
     def format(self, raw: str, user_query: str = "") -> AssistantResponse:
+        raw = self._sanitize(raw)
+
         """
         Форматирует сырой результат в структурированный ответ.
 
@@ -137,11 +142,22 @@ class ResponseFormatter:
         Returns:
             AssistantResponse с полями voice и screen.blocks
         """
+        # Если ответ уже развёрнутый/структурированный (markdown-таблицы, заголовки,
+        # длинные списки) — не переформатируем его через LLM: локальная модель
+        # склонна сжимать такие ответы и терять данные. Отдаём raw как текстовый
+        # блок и просим LLM только короткую фразу для voice.
+        if self._is_structured(raw):
+            return self._passthrough(raw, user_query)
+
         prompt = (
             f"Запрос пользователя: {user_query}\n\n"
             f"Результат выполнения:\n{raw}\n\n"
             "Сформируй структурированный ответ по правилам. JSON:"
         )
+
+        print("\n" + "=" * 20 + " [ResponseFormatter] RAW INPUT " + "=" * 20, flush=True)
+        print(raw, flush=True)
+        print("=" * 70, flush=True)
 
         try:
             resp = _llm.get_client().chat.completions.create(
@@ -151,12 +167,23 @@ class ResponseFormatter:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                max_tokens=1024,
+                max_tokens=8192,
                 extra_body=_llm.get_extra_body(),
             )
-            content = resp.choices[0].message.content.strip()
-            return self._parse(content, raw)
-        except Exception:
+            choice = resp.choices[0]
+            content = choice.message.content or ""
+            finish = getattr(choice, "finish_reason", None)
+            print(f"\n===== [ResponseFormatter] LLM OUTPUT (finish_reason={finish}) =====",
+                  flush=True)
+            print(content, flush=True)
+            print("=" * 70, flush=True)
+            # Если модель упёрлась в лимит — JSON почти наверняка обрезан,
+            # лучше отдать полный raw, чем потерять данные.
+            if finish == "length":
+                return self._fallback(raw)
+            return self._parse(content.strip(), raw)
+        except Exception as e:
+            print(f"[ResponseFormatter] LLM call failed: {e!r}", flush=True)
             return self._fallback(raw)
 
     def _parse(self, content: str, raw: str) -> AssistantResponse:
@@ -223,14 +250,132 @@ class ResponseFormatter:
 
         return None
 
-    def _fallback(self, raw: str) -> AssistantResponse:
-        """Минимальный fallback без LLM — берём первое предложение как voice."""
-        sentence = re.split(r"[.!?\n]", raw.strip())[0].strip()
-        voice = sentence if sentence else raw
+    @staticmethod
+    def _sanitize(raw: str) -> str:
+        """Вырезает служебный мета-хвост, который иногда приклеивает LLM:
+        строки `task_done: ...`, трейлинг-комментарии про источники данных,
+        висячие разделители `---`."""
+        if not raw:
+            return raw
+        s = raw
 
-        # Эвристика: если результат длинный — показываем как text-блок
+        # 1) Всё от первого `task_done:` до конца.
+        m = re.search(r"(?im)^[ \t]*task_done\s*:.*$", s)
+        if m:
+            s = s[:m.start()]
+
+        # 2) Трейлинг-параграф-пояснение «Собранные данные …» / «Источник …» и т.п.
+        s = re.sub(
+            r"(?ims)\n+(?:---+\s*\n+)?"
+            r"(?:собранн[аыео]\w*\s+данны\w*|источник\w*|данны\w+\s+получен\w+)"
+            r"[^\n]*(?:\n(?!\n)[^\n]*)*\s*$",
+            "",
+            s,
+        )
+
+        # 3) Висячие разделители в конце (несколько `---` подряд).
+        s = re.sub(r"(?m)(?:^\s*-{3,}\s*$\n?)+\Z", "", s)
+
+        return s.rstrip() + ("\n" if raw.endswith("\n") else "")
+
+    @staticmethod
+    def _is_structured(raw: str) -> bool:
+        """Эвристика: ответ уже оформлен (таблица/заголовки/длинный список) или просто длинный."""
+        if not raw:
+            return False
+        r = raw.strip()
+        if len(r) >= 600:
+            return True
+        has_table = ("|" in r and r.count("\n") >= 2 and "---" in r)
+        has_heading = any(line.lstrip().startswith("#") for line in r.splitlines())
+        bullet_count = sum(1 for line in r.splitlines()
+                           if line.lstrip().startswith(("- ", "* ", "• "))
+                           or re.match(r"^\s*\d+[\.\)]\s", line))
+        return has_table or has_heading or bullet_count >= 4
+
+    def _passthrough(self, raw: str, user_query: str) -> AssistantResponse:
+        """Разбираем markdown в нативные блоки (таблицы/списки/текст)."""
+        voice = self._short_voice(raw, user_query) or self._first_sentence(raw)
+        blocks = self._markdown_to_blocks(raw)
+        if not blocks:
+            blocks = [TextBlock(text=raw.strip())]
+        return AssistantResponse(voice=voice, screen=ScreenData(blocks=blocks))
+
+    @staticmethod
+    def _markdown_to_blocks(raw: str) -> List[Block]:
+        """Минимальный markdown → blocks: pipe-table → TableBlock, группы текста → TextBlock."""
+        lines = raw.splitlines()
         blocks: List[Block] = []
-        if len(raw) > 150:
-            blocks.append(TextBlock(text=raw))
+        text_buf: List[str] = []
 
+        def flush_text():
+            if not text_buf:
+                return
+            t = "\n".join(text_buf).strip()
+            text_buf.clear()
+            if t:
+                blocks.append(TextBlock(text=t))
+
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            # pipe-table: строка с |, следом разделитель | --- | --- |
+            if ("|" in line and i + 1 < n
+                    and re.match(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$", lines[i + 1])):
+                flush_text()
+                header = [c.strip() for c in line.strip().strip("|").split("|")]
+                rows: List[Dict[str, Any]] = []
+                j = i + 2
+                while j < n and "|" in lines[j] and lines[j].strip():
+                    cells = [c.strip() for c in lines[j].strip().strip("|").split("|")]
+                    if len(cells) < len(header):
+                        cells += [""] * (len(header) - len(cells))
+                    rows.append({header[k]: cells[k] for k in range(len(header))})
+                    j += 1
+                if rows:
+                    blocks.append(TableBlock(rows=rows))
+                i = j
+                continue
+            text_buf.append(line)
+            i += 1
+
+        flush_text()
+        return blocks
+
+    def _short_voice(self, raw: str, user_query: str) -> str:
+        """Один короткий запрос к LLM только ради voice-фразы (до 10 слов)."""
+        try:
+            resp = _llm.get_client().chat.completions.create(
+                model=_llm.get_model(),
+                messages=[
+                    {"role": "system", "content":
+                        "/no_think\nВыдай ровно одно предложение до 10 слов — "
+                        "краткое резюме ответа для озвучки. Без кавычек, без префиксов."},
+                    {"role": "user", "content":
+                        f"Запрос: {user_query}\n\nОтвет:\n{raw[:3000]}"},
+                ],
+                temperature=0.1,
+                max_tokens=60,
+                extra_body=_llm.get_extra_body(),
+            )
+            txt = (resp.choices[0].message.content or "").strip()
+            # снимаем возможные кавычки и обрезаем до одного предложения
+            txt = txt.strip().strip('"\'«»`').splitlines()[0] if txt else ""
+            return txt[:200]
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _first_sentence(raw: str) -> str:
+        s = re.split(r"[.!?\n]", raw.strip())[0].strip()
+        return (s[:200] if s else raw[:200]) or raw
+
+    def _fallback(self, raw: str) -> AssistantResponse:
+        """Фолбэк без LLM — короткое предложение в voice, полный raw в text-блоке."""
+        sentence = re.split(r"[.!?\n]", raw.strip())[0].strip()
+        voice = (sentence[:200] if sentence else raw[:200]) or raw
+
+        # Всегда кладём полный текст в screen, чтобы ничего не терять.
+        blocks: List[Block] = [TextBlock(text=raw)] if raw.strip() else []
         return AssistantResponse(voice=voice, screen=ScreenData(blocks=blocks))

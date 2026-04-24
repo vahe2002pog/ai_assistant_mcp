@@ -54,9 +54,17 @@ def tavily_search(query: str, max_results: int = 3, search_depth: str = "basic")
             search_depth=search_depth,
             timeout=_TAVILY_TIMEOUT,
         )
-        
+
+        raw_results = response.get("results", []) or []
+        # Фоновое сохранение в RAG — не блокирует ответ.
+        try:
+            from ui_automation.rag.web_search_manager import save_search_results_async
+            save_search_results_async(query, raw_results, source="tavily_search")
+        except Exception:
+            pass
+
         results = []
-        for r in response.get("results", []):
+        for r in raw_results:
             title = r.get("title", "Нет заголовка")
             href = r.get("url", "")
             body = r.get("content", "Нет описания")
@@ -92,9 +100,16 @@ def tavily_extract(urls: list[str]) -> str:
         
         client = _get_client()
         response = client.extract(urls=urls, timeout=_TAVILY_TIMEOUT)
-        
+
+        raw_items = response.get("results", []) or []
+        try:
+            from ui_automation.rag.web_search_manager import save_extract_results
+            save_extract_results(urls, raw_items)
+        except Exception:
+            pass
+
         results = []
-        for item in response.get("results", []):
+        for item in raw_items:
             url = item.get("url", "")
             content = item.get("content", "Нет контента")
             results.append(f"🔗 {url}\n📄 {content}\n")

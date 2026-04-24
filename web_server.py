@@ -236,15 +236,23 @@ def _dispatch(message: str, conv_id: Optional[int] = None) -> dict:
     try:
         windows_ctx = _m._get_windows_context()
         rag_ctx = _m._rag_retrieve(message)
+        scenario = _m._match_scenario(message)
         chat_ctx = _build_chat_history(conv_id, skip_last_user=True)
         hint = ""
-        if chat_ctx:
-            hint += f"[История текущего чата]\n{chat_ctx}\n"
+        if scenario:
+            hint += (
+                f"[Сценарий пользователя — \"{scenario['name']}\"]\n"
+                f"{scenario['body'].strip()}\n"
+                "(Следуй шагам сценария, адаптируя под текущее состояние системы.)\n"
+            )
         if windows_ctx:
             hint += f"[Открытые окна]\n{windows_ctx}\n"
         if rag_ctx:
             hint += f"[Релевантный опыт]\n{rag_ctx}"
-        result = _HOST.dispatch(message, context_hint=hint, conv_id=conv_id)
+        # chat_ctx идёт ОТДЕЛЬНЫМ параметром — его должен видеть именно Planner,
+        # а не только worker'ы (иначе планировщик не поймёт «продолжи», «ещё раз» и т.п.).
+        result = _HOST.dispatch(message, context_hint=hint, conv_id=conv_id,
+                                chat_history=chat_ctx)
         if hasattr(result, "to_dict"):
             out = result.to_dict()
         else:
@@ -259,7 +267,7 @@ def _dispatch(message: str, conv_id: Optional[int] = None) -> dict:
             for b in blocks:
                 if b.get("type") == "links":
                     existing.update(b.get("links") or [])
-            extra = [u for u in urls if u not in existing]
+            extra = [u for u in urls if u not in existing][:8]
             if extra:
                 blocks.append({"type": "links", "title": "Источники", "links": extra})
         return out
@@ -275,6 +283,7 @@ _STATIC_FILES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
+    "/vault.js": ("vault.js", "application/javascript; charset=utf-8"),
     "/bridge.js": ("bridge.js", "application/javascript; charset=utf-8"),
     "/icon.svg": ("../src/Icon_Compass.svg", "image/svg+xml"),
     "/favicon.svg": ("../src/Icon_Compass.svg", "image/svg+xml"),
@@ -286,6 +295,139 @@ _MIME_BY_EXT = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
 }
+
+
+_DOC_EXTS = {
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".odt", ".ods", ".odp", ".rtf",
+    ".txt", ".md", ".csv", ".tsv", ".json", ".xml",
+    ".yaml", ".yml", ".html", ".htm", ".log",
+}
+_TEXT_EXTS = {".txt", ".md", ".csv", ".tsv", ".json", ".xml",
+              ".yaml", ".yml", ".html", ".htm", ".log", ".rtf"}
+_MAX_INLINE_PREVIEW = 8000  # chars per document included in agent hint
+
+
+def _save_document(data_url_or_b64: str, filename_hint: str) -> Optional[dict]:
+    """Сохраняет документ, сохраняя оригинальное имя и расширение."""
+    s = data_url_or_b64
+    mime = "application/octet-stream"
+    if s.startswith("data:"):
+        head, _, b64 = s.partition(",")
+        m = re.match(r"data:([^;]+);base64", head)
+        if m:
+            mime = m.group(1)
+    else:
+        b64 = s
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:
+        return None
+    base_name = os.path.basename(filename_hint or "file")
+    ext = os.path.splitext(base_name)[1].lower() or ""
+    if ext not in _DOC_EXTS:
+        # неизвестные расширения не принимаем, чтобы не плодить мусор
+        return None
+    stored = f"{uuid.uuid4().hex}{ext}"
+    path = os.path.join(_ATTACH_DIR, stored)
+    with open(path, "wb") as f:
+        f.write(raw)
+    return {
+        "url": f"/attachments/{stored}",
+        "name": base_name,
+        "mime": mime,
+        "kind": "doc",
+        "path": os.path.abspath(path),
+    }
+
+
+def _extract_doc_text(path: str, full: bool = False) -> str:
+    """Best-effort извлечение текста для популярных форматов. Пусто, если не получилось.
+    full=True — без обрезки по _MAX_INLINE_PREVIEW (для сохранения в vault)."""
+    ext = os.path.splitext(path)[1].lower()
+    limit = float("inf") if full else _MAX_INLINE_PREVIEW
+    try:
+        if ext in _TEXT_EXTS:
+            for enc in ("utf-8", "cp1251", "latin-1"):
+                try:
+                    with open(path, "r", encoding=enc) as f:
+                        return f.read() if full else f.read(_MAX_INLINE_PREVIEW + 1)
+                except UnicodeDecodeError:
+                    continue
+            return ""
+        if ext == ".pdf":
+            try:
+                import fitz  # type: ignore  # pymupdf
+                parts = []
+                total = 0
+                with fitz.open(path) as doc:
+                    for page in doc:
+                        t = page.get_text("text") or ""
+                        parts.append(t)
+                        total += len(t)
+                        if total > limit:
+                            break
+                text = "\n".join(parts)
+                if text.strip():
+                    return text
+            except Exception:
+                pass
+            try:
+                from pypdf import PdfReader  # type: ignore
+            except Exception:
+                try:
+                    from PyPDF2 import PdfReader  # type: ignore
+                except Exception:
+                    return ""
+            reader = PdfReader(path)
+            parts = []
+            total = 0
+            for page in reader.pages:
+                t = page.extract_text() or ""
+                parts.append(t)
+                total += len(t)
+                if total > limit:
+                    break
+            return "\n".join(parts)
+        if ext == ".docx":
+            try:
+                from docx import Document  # type: ignore
+            except Exception:
+                return ""
+            doc = Document(path)
+            return "\n".join(p.text for p in doc.paragraphs)
+        if ext == ".xlsx":
+            try:
+                from openpyxl import load_workbook  # type: ignore
+            except Exception:
+                return ""
+            wb = load_workbook(path, read_only=True, data_only=True)
+            lines = []
+            for ws in wb.worksheets:
+                lines.append(f"# Лист: {ws.title}")
+                for row in ws.iter_rows(values_only=True):
+                    lines.append("\t".join("" if v is None else str(v) for v in row))
+                    if sum(len(l) for l in lines) > limit:
+                        break
+                if sum(len(l) for l in lines) > limit:
+                    break
+            return "\n".join(lines)
+        if ext == ".pptx":
+            try:
+                from pptx import Presentation  # type: ignore
+            except Exception:
+                return ""
+            prs = Presentation(path)
+            parts = []
+            for i, slide in enumerate(prs.slides, 1):
+                parts.append(f"# Слайд {i}")
+                for sh in slide.shapes:
+                    if hasattr(sh, "text") and sh.text:
+                        parts.append(sh.text)
+            return "\n".join(parts)
+    except Exception:
+        return ""
+    return ""
 
 
 def _save_attachment(data_url_or_b64: str, filename_hint: str = "") -> Optional[dict]:
@@ -391,12 +533,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/config":
             from ui_automation import llm_config as _llm
+            import database as _db
             cfg = _llm.get()
-            providers = [{"id": k, "label": v["label"], "base_url": v["base_url"]}
+            providers = [{"id": k, "label": v["label"], "base_url": v["base_url"],
+                          "api_key_set": _db.provider_key_has(k)}
                          for k, v in _llm.PROVIDERS.items()]
             safe_cfg = dict(cfg)
             safe_cfg["api_key_set"] = bool(cfg.get("api_key"))
             safe_cfg.pop("api_key", None)
+            vp = (cfg.get("vision_provider") or "").strip()
+            safe_cfg["vision_api_key_set"] = _db.provider_key_has(vp) if vp else safe_cfg["api_key_set"]
             self._send_json(200, {"config": safe_cfg, "providers": providers})
             return
 
@@ -413,6 +559,7 @@ class Handler(BaseHTTPRequestHandler):
                     api_key = _up.unquote(part[len("api_key="):])
             groups = _llm.list_model_groups(base_url=base, api_key=api_key)
             if groups:
+                # groups[i]["models"] — список dict'ов {id, vision}
                 flat = [m for g in groups for m in g["models"]]
                 self._send_json(200, {"models": flat, "groups": groups})
             else:
@@ -436,6 +583,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400); return
             import database as _db
             self._send_json(200, {"items": _db.msg_list(cid)})
+            return
+
+        if path == "/api/vault/scenarios":
+            from ui_automation.rag import vault_manager as _vm
+            self._send_json(200, {"items": _vm.list_notes("Scenarios")})
+            return
+
+        if path == "/api/vault/documents":
+            from ui_automation.rag import vault_manager as _vm
+            self._send_json(200, {"items": _vm.list_notes("Attachments")})
+            return
+
+        if path.startswith("/api/vault/note/"):
+            from ui_automation.rag import vault_manager as _vm
+            rel = path[len("/api/vault/note/"):]
+            import urllib.parse as _up
+            rel = _up.unquote(rel)
+            note = _vm.read_note(rel)
+            if not note:
+                self.send_error(404); return
+            self._send_json(200, note)
             return
 
         if path.startswith("/attachments/"):
@@ -478,14 +646,26 @@ class Handler(BaseHTTPRequestHandler):
             message = (req.get("message") or "").strip()
             conv_id = req.get("conversation_id")
             images = req.get("images") or []  # list of data-url strings
-            if not message and not images:
+            documents = req.get("documents") or []  # list of {dataUrl, name, mime}
+            if not message and not images and not documents:
                 self._send_json(400, {"error": "empty message"}); return
 
             attachments = []
+            doc_attachments = []
             for img in images:
                 saved = _save_attachment(img)
                 if saved:
                     attachments.append(saved)
+            for d in documents:
+                if not isinstance(d, dict):
+                    continue
+                saved = _save_document(d.get("dataUrl") or "", d.get("name") or "file")
+                if saved:
+                    doc_attachments.append(saved)
+                    attachments.append({
+                        "url": saved["url"], "name": saved["name"],
+                        "mime": saved["mime"], "kind": "doc",
+                    })
 
             # Create conversation if missing
             if not conv_id:
@@ -502,9 +682,28 @@ class Handler(BaseHTTPRequestHandler):
 
             # Augment message with attachment hint for agent context
             augmented = message
-            if attachments:
-                paths = ", ".join(os.path.abspath(os.path.join(_ROOT, a["url"].lstrip("/"))) for a in attachments)
-                augmented = (message + f"\n\n[Прикреплённые изображения: {paths}]").strip()
+            img_atts = [a for a in attachments if a.get("kind") != "doc"]
+            if img_atts:
+                paths = ", ".join(os.path.abspath(os.path.join(_ROOT, a["url"].lstrip("/"))) for a in img_atts)
+                augmented = (
+                    augmented
+                    + f"\n\n[Пользователь приложил к сообщению картинки (не скриншоты экрана): {paths}. "
+                    + "Используй vision-агент, чтобы посмотреть именно на эти файлы и ответить по их содержимому. "
+                    + "НЕ открывай их в просмотрщике, НЕ делай скриншот экрана.]"
+                ).strip()
+            if doc_attachments:
+                parts = ["\n\n[Прикреплённые документы]"]
+                for d in doc_attachments:
+                    parts.append(f"— {d['name']} ({d['path']})")
+                    preview = _extract_doc_text(d["path"])
+                    if preview:
+                        truncated = preview[:_MAX_INLINE_PREVIEW]
+                        suffix = "\n…[текст обрезан, полный файл доступен по пути выше]" \
+                                 if len(preview) > _MAX_INLINE_PREVIEW else ""
+                        parts.append(f"--- начало содержимого {d['name']} ---\n"
+                                     f"{truncated}{suffix}\n"
+                                     f"--- конец содержимого {d['name']} ---")
+                augmented = (augmented + "\n" + "\n".join(parts)).strip()
 
             reply = _dispatch(augmented, conv_id=conv_id)
             from ui_automation import cancel as _cancel
@@ -542,10 +741,18 @@ class Handler(BaseHTTPRequestHandler):
                 model=req.get("model"),
                 base_url=req.get("base_url"),
                 api_key=req.get("api_key"),
+                vision_model=req.get("vision_model"),
+                folder=req.get("folder"),
+                vision_provider=req.get("vision_provider"),
+                vision_base_url=req.get("vision_base_url"),
+                vision_api_key=req.get("vision_api_key"),
             )
             safe_cfg = dict(cfg)
             safe_cfg["api_key_set"] = bool(cfg.get("api_key"))
             safe_cfg.pop("api_key", None)
+            import database as _db
+            vp = (cfg.get("vision_provider") or "").strip()
+            safe_cfg["vision_api_key_set"] = _db.provider_key_has(vp) if vp else safe_cfg["api_key_set"]
             BROKER.emit("config_updated", safe_cfg)
             self._send_json(200, {"config": safe_cfg})
             return
@@ -558,6 +765,61 @@ class Handler(BaseHTTPRequestHandler):
             _cancel.request_cancel(key)
             BROKER.emit("cancelled", {"conversation_id": cid})
             self._send_json(200, {"ok": True})
+            return
+
+        if path == "/api/vault/scenarios":
+            from ui_automation.rag import vault_manager as _vm
+            req = self._read_json() or {}
+            name = (req.get("name") or "").strip()
+            body = (req.get("body") or "").strip()
+            triggers = req.get("triggers") or []
+            tags = req.get("tags") or ["scenario"]
+            if not name or not body:
+                self._send_json(400, {"error": "name and body are required"}); return
+            if isinstance(triggers, str):
+                triggers = [t.strip() for t in triggers.split(",") if t.strip()]
+            path_saved = _vm.save_scenario(name, triggers, body, tags=tags)
+            self._send_json(200, {"ok": True, "path": path_saved})
+            return
+
+        if path == "/api/vault/documents":
+            from ui_automation.rag import vault_manager as _vm
+            req = self._read_json() or {}
+            data = req.get("data") or ""
+            name_hint = req.get("name") or "file"
+            tags_raw = req.get("tags") or []
+            if isinstance(tags_raw, str):
+                tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+            else:
+                tags = list(tags_raw)
+            # Сохраняем бинарник в vault/Attachments/
+            base_name = os.path.basename(name_hint)
+            ext = os.path.splitext(base_name)[1].lower()
+            if ext not in _DOC_EXTS:
+                self._send_json(400, {"error": "unsupported extension"}); return
+            s = data
+            if s.startswith("data:"):
+                _, _, b64 = s.partition(",")
+            else:
+                b64 = s
+            try:
+                raw = base64.b64decode(b64)
+            except Exception:
+                self._send_json(400, {"error": "bad base64"}); return
+            from ui_automation.rag.vault_manager import VAULT_DIR
+            import re as _re
+            safe = _re.sub(r"[^\w.\- а-яА-ЯёЁ]+", "_", base_name)
+            target = os.path.join(VAULT_DIR, "Attachments", safe)
+            # не перезаписываем — при коллизии добавляем суффикс
+            if os.path.exists(target):
+                stem, ex = os.path.splitext(safe)
+                target = os.path.join(VAULT_DIR, "Attachments", f"{stem}-{int(time.time())}{ex}")
+            with open(target, "wb") as f:
+                f.write(raw)
+            text = _extract_doc_text(target, full=True)
+            md_path = _vm.save_document(target, text or "", tags=tags or ["document"])
+            self._send_json(200, {"ok": True, "path": target, "note": md_path,
+                                  "preview": (text or "")[:400]})
             return
 
         if path == "/api/upload":
@@ -575,6 +837,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         path = self.path.split("?", 1)[0]
         import database as _db
+        if path.startswith("/api/vault/note/"):
+            from ui_automation.rag import vault_manager as _vm
+            import urllib.parse as _up
+            rel = _up.unquote(path[len("/api/vault/note/"):])
+            ok = _vm.delete_note(rel)
+            self._send_json(200 if ok else 404, {"ok": ok})
+            return
         if path.startswith("/api/conversations/"):
             try:
                 cid = int(path.split("/")[3])

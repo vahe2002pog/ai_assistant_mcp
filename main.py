@@ -281,6 +281,7 @@ def _build_tools() -> Tuple[Dict[str, Callable], List[Dict]]:
         "mcp_modules.tools_browser",
         "mcp_modules.tools_uiautomation",
         "mcp_modules.tools_bookmarks",
+        "mcp_modules.tools_office",
     ]
 
     import importlib
@@ -497,42 +498,21 @@ def _bg_llm_bookmark_aliases() -> None:
 
 
 def _rag_retrieve(query: str, top_k: int = 3) -> str:
-    """
-    Ищет релевантные фрагменты в FAISS-индексах (experience + docs).
-    Возвращает строку для вставки в контекст или пустую строку если ничего не найдено.
-    """
-    results = []
-    _RAG_PATHS = [
-        ("vectordb/experience",      "Опыт"),
-        ("vectordb/knowledge_index", "База знаний"),
-        ("vectordb/demonstration",   "Демонстрация"),
-        ("vectordb/docs/example",    "Документация"),
-    ]
-
+    """Собирает релевантный контекст из Obsidian-vault (Scenarios/Experience/Knowledge/Attachments)."""
     try:
-        from langchain_community.vectorstores import FAISS
-        from ui_automation.utils import get_hugginface_embedding
-        embeddings = get_hugginface_embedding()
-
-        for path, label in _RAG_PATHS:
-            abs_path = os.path.join(_ROOT, path)
-            if not os.path.isdir(abs_path):
-                continue
-            try:
-                db = FAISS.load_local(abs_path, embeddings, allow_dangerous_deserialization=True)
-                docs = db.similarity_search(query, k=top_k)
-                for doc in docs:
-                    text = doc.page_content.strip()
-                    if text:
-                        results.append(f"[{label}] {text}")
-            except Exception:
-                continue
+        from ui_automation.rag import vault_manager
+        return vault_manager.format_context(query, k_per_folder=max(2, top_k - 1))
     except Exception:
         return ""
 
-    if not results:
-        return ""
-    return "\n".join(results)
+
+def _match_scenario(query: str):
+    """Пробует найти сценарий по точному триггеру. Возвращает заметку или None."""
+    try:
+        from ui_automation.rag import vault_manager
+        return vault_manager.match_scenario_by_trigger(query)
+    except Exception:
+        return None
 
 
 def _get_windows_context() -> str:
@@ -652,7 +632,14 @@ def run_chat(request: str = "") -> None:
     def _dispatch(user_input: str) -> None:
         windows_ctx = _get_windows_context()
         rag_ctx = _rag_retrieve(user_input)
+        scenario = _match_scenario(user_input)
         context_hint = ""
+        if scenario:
+            context_hint += (
+                f"[Сценарий пользователя — \"{scenario['name']}\"]\n"
+                f"{scenario['body'].strip()}\n"
+                "(Следуй шагам сценария, адаптируя под текущее состояние системы.)\n"
+            )
         if windows_ctx:
             context_hint += f"[Открытые окна]\n{windows_ctx}\n"
         if rag_ctx:
@@ -728,7 +715,13 @@ def _run_chat_flat(request: str = "") -> None:
             break
         windows_ctx = _get_windows_context()
         rag_ctx = _rag_retrieve(user_input)
+        scenario = _match_scenario(user_input)
         user_msg = user_input
+        if scenario:
+            user_msg += (
+                f"\n\n[Сценарий пользователя — \"{scenario['name']}\"]\n"
+                f"{scenario['body'].strip()}"
+            )
         if windows_ctx:
             user_msg += f"\n\n[Открытые окна]\n{windows_ctx}"
         if rag_ctx:
@@ -776,6 +769,7 @@ def run_mcp_server() -> None:
         "mcp_modules.tools_browser",
         "mcp_modules.tools_uiautomation",
         "mcp_modules.tools_bookmarks",
+        "mcp_modules.tools_office",
     ]
     for _mod in _sub_agents:
         __import__(_mod)
