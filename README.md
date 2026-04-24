@@ -1,4 +1,4 @@
-# AI Assistant MCP
+# Компас - AI Assistant
 
 Локальный голосовой/текстовый ассистент для Windows с агентной архитектурой
 (ReAct: Perceiver → Planner → Worker → Verifier), MCP-сервером и браузерным
