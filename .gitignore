@@ -5,7 +5,6 @@ mcp_modules/UIAutomationMCP/*
 TOOLS_DOCUMENTATION.md
 @AutomationLog.txt
 .venv/*
-.env
 vectordb/
 ui_agent_debug.log
 llama-server/*
