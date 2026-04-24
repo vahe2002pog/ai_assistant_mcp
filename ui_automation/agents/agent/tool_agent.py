@@ -240,6 +240,31 @@ def _build_tool_schema(name: str, fn: Callable) -> Dict:
     }
 
 
+# Кэш моделей, которые не умеют tool_choice="required" — чтобы не биться каждый раз.
+_NO_REQUIRED_TOOL_CHOICE: set = set()
+
+
+def _chat_with_tools(*, model, messages, tools, temperature, extra_body, client):
+    """chat.completions.create с фолбэком tool_choice="required" → "auto"
+    для моделей, где required не поддержан (например, deepseek-*)."""
+    use_required = model not in _NO_REQUIRED_TOOL_CHOICE
+    kwargs = dict(
+        model=model, messages=messages, tools=tools,
+        temperature=temperature, extra_body=extra_body,
+    )
+    if use_required:
+        kwargs["tool_choice"] = "required"
+    try:
+        return client.chat.completions.create(**kwargs)
+    except openai.BadRequestError as e:
+        if use_required and "tool_choice" in str(e).lower():
+            _NO_REQUIRED_TOOL_CHOICE.add(model)
+            kwargs.pop("tool_choice", None)
+            kwargs["tool_choice"] = "auto"
+            return client.chat.completions.create(**kwargs)
+        raise
+
+
 def _resolve_special(result: str) -> str:
     """Handle magic command strings returned by some tools."""
     if not isinstance(result, str):
@@ -515,13 +540,13 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
                     )
             messages = _compact_messages(messages)
             try:
-                response = _llm.get_client().chat.completions.create(
+                response = _chat_with_tools(
                     model=_llm.get_model(),
                     messages=messages,
                     tools=self._schemas,
-                    tool_choice="required",
                     temperature=0.3,
                     extra_body=_llm.get_extra_body(),
+                    client=_llm.get_client(),
                 )
             except openai.APIConnectionError:
                 return "Ошибка: нет соединения с моделью."
@@ -532,6 +557,10 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
 
             # Record assistant message
             entry: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+            # DeepSeek thinking-режим требует, чтобы reasoning_content возвращался обратно.
+            rc = getattr(msg, "reasoning_content", None)
+            if rc:
+                entry["reasoning_content"] = rc
             if msg.tool_calls:
                 entry["tool_calls"] = [
                     {

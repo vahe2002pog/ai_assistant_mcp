@@ -344,13 +344,14 @@ def _process_turn(
 
     while True:
         try:
-            response = client.chat.completions.create(
+            from ui_automation.agents.agent.tool_agent import _chat_with_tools
+            response = _chat_with_tools(
                 model=_API_MODEL,
                 messages=messages,
                 tools=openai_tools,
-                tool_choice="required",
                 temperature=0.7,
                 extra_body=_NO_THINK,
+                client=client,
             )
         except _openai.APIConnectionError:
             print("\n[Ошибка] Не удаётся подключиться к модели. Убедись, что llama-server запущен на порту 8000.")
@@ -364,6 +365,9 @@ def _process_turn(
 
         # Формируем запись в историю
         assistant_entry: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+        rc = getattr(msg, "reasoning_content", None)
+        if rc:
+            assistant_entry["reasoning_content"] = rc
         if msg.tool_calls:
             assistant_entry["tool_calls"] = [
                 {

@@ -68,6 +68,39 @@ _TOOL_STATUS = {
     "ui_wait_for_window": "Жду появления окна…",
     "ui_screenshot": "Делаю снимок экрана…",
     "task_done": "Завершаю…",
+    # Office / COM
+    "office_docs_search": "Ищу в документах…",
+    "com_run_python": "Работаю с Office…",
+    "office_run_python": "Работаю с Office…",
+    "office_close_dialogs": "Закрываю диалоги Office…",
+    "office_user_folder": "Смотрю папку пользователя…",
+    "office_available_apps": "Смотрю доступные Office-приложения…",
+    "office_running_apps": "Смотрю запущенные Office-приложения…",
+    "office_is_available": "Проверяю Office-приложение…",
+    "office_launch": "Запускаю Office-приложение…",
+    "office_quit": "Закрываю Office-приложение…",
+    "office_visible": "Меняю видимость окна Office…",
+    # Excel
+    "excel_get_sheets": "Смотрю листы Excel…",
+    "excel_read_sheet": "Читаю лист Excel…",
+    "excel_write_cell": "Записываю ячейку в Excel…",
+    "excel_write_range": "Записываю диапазон в Excel…",
+    "excel_apply_formula": "Применяю формулу в Excel…",
+    "excel_create_workbook": "Создаю книгу Excel…",
+    # Word
+    "word_create_document": "Создаю документ Word…",
+    "word_read_document": "Читаю документ Word…",
+    "word_write_text": "Пишу в документ Word…",
+    "word_find_replace": "Ищу и заменяю в Word…",
+    "word_get_tables": "Смотрю таблицы Word…",
+    # PowerPoint
+    "ppt_create": "Создаю презентацию…",
+    "ppt_add_slide": "Добавляю слайд…",
+    "ppt_add_textbox": "Добавляю текст на слайд…",
+    "ppt_read_slides": "Читаю слайды…",
+    # Outlook
+    "outlook_send_mail": "Отправляю письмо…",
+    "outlook_list_inbox": "Смотрю входящие…",
 }
 _AGENT_STATUS = {
     "HostAgent": "Планирую задачу…",
@@ -88,6 +121,16 @@ def _tool_phrase(name: str) -> str:
         return "Работаю с браузером…"
     if name.startswith("ui_"):
         return "Работаю с интерфейсом…"
+    if name.startswith("excel_"):
+        return "Работаю с Excel…"
+    if name.startswith("word_"):
+        return "Работаю с Word…"
+    if name.startswith("ppt_"):
+        return "Работаю с PowerPoint…"
+    if name.startswith("outlook_"):
+        return "Работаю с Outlook…"
+    if name.startswith("office_"):
+        return "Работаю с Office…"
     return f"Выполняю: {name}…"
 
 

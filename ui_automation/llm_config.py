@@ -540,13 +540,37 @@ def list_models(base_url: Optional[str] = None,
             nm = m.get("name")
             if not nm:
                 continue
-            # У Ollama есть details.families — "clip"/"mllama" указывают на зрение.
-            det = m.get("details") or {}
-            fams = det.get("families") or []
-            vision = any(str(f).lower() in ("clip", "mllama", "vision") for f in fams)
-            if not vision:
-                vision = _guess_vision_by_name(nm)
-            entries.append({"id": nm, "vision": vision})
+            vision = _ollama_show_has_vision(host, nm)
+            if vision is None:
+                # Фолбэк: details.families из /api/tags + эвристика по имени.
+                det = m.get("details") or {}
+                fams = det.get("families") or []
+                vision = any(str(f).lower() in ("clip", "mllama", "vision") for f in fams)
+                if not vision:
+                    vision = _guess_vision_by_name(nm)
+            entries.append({"id": nm, "vision": bool(vision)})
         if entries:
             return _dedup_sort(entries)
     return []
+
+
+def _ollama_show_has_vision(host: str, name: str) -> Optional[bool]:
+    """Спрашивает Ollama `/api/show` и читает `capabilities`.
+    Возвращает True/False, если ответ получен; None — если endpoint недоступен
+    (старая версия Ollama) — тогда вызывающий код использует фолбэк."""
+    try:
+        body = json.dumps({"name": name}).encode("utf-8")
+        req = urllib.request.Request(
+            host + "/api/show",
+            data=body,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    caps = data.get("capabilities")
+    if not isinstance(caps, list):
+        return None
+    return any(str(c).lower() == "vision" for c in caps)

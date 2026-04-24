@@ -144,13 +144,14 @@ class VisionAgent(ToolAgent):
                         f"({_MAX_TOOL_CALLS})."
                     )
             try:
-                response = _llm.get_vision_client().chat.completions.create(
+                from ui_automation.agents.agent.tool_agent import _chat_with_tools
+                response = _chat_with_tools(
                     model=_llm.get_vision_model(),
                     messages=messages,
                     tools=self._schemas,
-                    tool_choice="required",
                     temperature=0.1,
                     extra_body=_llm.get_vision_extra_body(),
+                    client=_llm.get_vision_client(),
                 )
             except openai.APIConnectionError:
                 return "Ошибка: нет соединения с моделью."
@@ -160,6 +161,9 @@ class VisionAgent(ToolAgent):
             msg = response.choices[0].message
 
             entry: Dict = {"role": "assistant", "content": msg.content or ""}
+            rc = getattr(msg, "reasoning_content", None)
+            if rc:
+                entry["reasoning_content"] = rc
             if msg.tool_calls:
                 entry["tool_calls"] = [
                     {
