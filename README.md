@@ -43,9 +43,8 @@ TAVILY_API_KEY=...#https://app.tavily.com/home
 HF_HUB_OFFLINE=1
 ```
 
-Провайдер, модель, vision-модель можно переключать на лету через веб-UI
-(`/api/config`, `/api/models`) — без перезапуска. Поддерживаются
-llama.cpp, Ollama, OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Yandex AI Studio.
+Провайдер, модель, vision-модель можно переключать на лету через интерфейс — без перезапуска.
+Поддерживаются llama.cpp, Ollama, OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Yandex AI Studio.
 
 ## Архитектура (кратко)
 
