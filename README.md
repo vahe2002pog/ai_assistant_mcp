@@ -45,7 +45,7 @@ HF_HUB_OFFLINE=1
 
 Провайдер, модель, vision-модель можно переключать на лету через веб-UI
 (`/api/config`, `/api/models`) — без перезапуска. Поддерживаются
-llama.cpp, Ollama, OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek.
+llama.cpp, Ollama, OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Yandex AI Studio.
 
 ## Архитектура (кратко)
 
