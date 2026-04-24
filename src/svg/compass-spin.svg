@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <g>
+    <path d="M12 2 L13.9 10.1 L22 12 L13.9 13.9 L12 22 L10.1 13.9 L2 12 L10.1 10.1 Z" fill="#FF6A1A"></path>
+    <circle cx="12" cy="12" r="2.2" fill="#1e2022"></circle>
+    <animateTransform attributeName="transform" attributeType="XML" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite"></animateTransform>
+  </g>
+</svg>
