@@ -265,13 +265,11 @@ def _generate_aliases_llm(bookmarks: list) -> dict:
     Генерирует алиасы через LLM для списка [(title, url), ...].
     Возвращает {url: [aliases]}.
     """
-    import openai
+    from ui_automation import llm_config as _llm
 
-    api_base  = os.environ.get("API_BASE",  "http://localhost:8000/v1")
-    api_key   = os.environ.get("API_KEY",   "llama")
-    api_model = os.environ.get("API_MODEL", "local")
-
-    client = openai.OpenAI(base_url=api_base, api_key=api_key)
+    client     = _llm.get_client()
+    api_model  = _llm.get_model()
+    extra_body = _llm.get_extra_body()
     result = {}
 
     for i in range(0, len(bookmarks), _LLM_BATCH_SIZE):
@@ -291,7 +289,7 @@ def _generate_aliases_llm(bookmarks: list) -> dict:
                 ],
                 temperature=0,
                 max_tokens=2048,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                extra_body=extra_body,
             )
             raw = (response.choices[0].message.content or "").strip()
             content = re.sub(r'<think>[\s\S]*?</think>', '', raw, flags=re.DOTALL).strip()
