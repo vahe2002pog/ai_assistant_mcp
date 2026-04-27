@@ -64,6 +64,7 @@ class ScreenData:
 class AssistantResponse:
     voice: str
     screen: ScreenData = field(default_factory=ScreenData)
+    used_sources: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         blocks = []
@@ -82,7 +83,10 @@ class AssistantResponse:
             elif isinstance(b, FilesBlock):
                 d["file_paths"] = b.file_paths
             blocks.append(d)
-        return {"voice": self.voice, "screen": {"blocks": blocks}}
+        out = {"voice": self.voice, "screen": {"blocks": blocks}}
+        if self.used_sources:
+            out["used_sources"] = list(self.used_sources)
+        return out
 
 
 # ─── Системный промпт форматтера ──────────────────────────────────────────────
@@ -97,7 +101,8 @@ _FORMAT_SYSTEM = """/no_think
   "voice": "...",
   "screen": {
     "blocks": [...]
-  }
+  },
+  "used_sources": ["https://..."]
 }
 
 Правила:
@@ -118,6 +123,14 @@ _FORMAT_SYSTEM = """/no_think
 - ВАЖНО: не теряй содержимое. Если в сыром результате есть факты, таблицы, перечисления,
   ссылки — они должны попасть в blocks целиком. Нельзя сокращать или выбрасывать данные;
   переформатируй в подходящие блоки (list/table/links/text), но сохраняй всё.
+
+used_sources:
+- Список URL ИЗ предоставленного раздела «Доступные источники», ИЗ КОТОРЫХ ты реально
+  взял хотя бы один факт, попавший в voice или blocks.
+- НЕ включай URL, чьи факты ты не использовал (например, страница из выдачи оказалась
+  не по теме, словарём или дублем).
+- Если веб-источников не было — верни [].
+- Не выдумывай URL: бери только из списка ниже.
 """
 
 
@@ -129,8 +142,10 @@ class ResponseFormatter:
     def __init__(self) -> None:
         pass
 
-    def format(self, raw: str, user_query: str = "") -> AssistantResponse:
+    def format(self, raw: str, user_query: str = "",
+               available_sources: Optional[List[Dict[str, str]]] = None) -> AssistantResponse:
         raw = self._sanitize(raw)
+        available_sources = available_sources or []
 
         """
         Форматирует сырой результат в структурированный ответ.
@@ -147,11 +162,24 @@ class ResponseFormatter:
         # склонна сжимать такие ответы и терять данные. Отдаём raw как текстовый
         # блок и просим LLM только короткую фразу для voice.
         if self._is_structured(raw):
-            return self._passthrough(raw, user_query)
+            return self._passthrough(raw, user_query, available_sources)
+
+        sources_block = ""
+        if available_sources:
+            lines = []
+            for s in available_sources:
+                t = (s.get("title") or "").strip()
+                u = s.get("url") or ""
+                if not u:
+                    continue
+                lines.append(f"- {u}" + (f" — {t}" if t else ""))
+            if lines:
+                sources_block = "\nДоступные источники (только из этого списка можно ставить в used_sources):\n" + "\n".join(lines) + "\n"
 
         prompt = (
             f"Запрос пользователя: {user_query}\n\n"
-            f"Результат выполнения:\n{raw}\n\n"
+            f"Результат выполнения:\n{raw}\n"
+            f"{sources_block}\n"
             "Сформируй структурированный ответ по правилам. JSON:"
         )
 
@@ -167,7 +195,7 @@ class ResponseFormatter:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                max_tokens=8192,
+                max_tokens=16384,
                 extra_body=_llm.get_extra_body(),
             )
             choice = resp.choices[0]
@@ -211,7 +239,13 @@ class ResponseFormatter:
             if block is not None:
                 blocks.append(block)
 
-        return AssistantResponse(voice=voice, screen=ScreenData(blocks=blocks))
+        used = []
+        for u in data.get("used_sources", []) or []:
+            if isinstance(u, str) and u.startswith(("http://", "https://")):
+                used.append(u)
+
+        return AssistantResponse(voice=voice, screen=ScreenData(blocks=blocks),
+                                 used_sources=used)
 
     def _parse_block(self, b: Dict) -> Optional[Block]:
         """Преобразует словарь блока в типизированный объект."""
@@ -293,13 +327,28 @@ class ResponseFormatter:
                            or re.match(r"^\s*\d+[\.\)]\s", line))
         return has_table or has_heading or bullet_count >= 4
 
-    def _passthrough(self, raw: str, user_query: str) -> AssistantResponse:
-        """Разбираем markdown в нативные блоки (таблицы/списки/текст)."""
+    def _passthrough(self, raw: str, user_query: str,
+                     available_sources: Optional[List[Dict[str, str]]] = None) -> AssistantResponse:
+        """Разбираем markdown в нативные блоки (таблицы/списки/текст).
+        Для длинных/уже отформатированных ответов LLM-форматтер не дёргаем,
+        поэтому used_sources вычисляем эвристически (sources.filter_used)."""
         voice = self._short_voice(raw, user_query) or self._first_sentence(raw)
         blocks = self._markdown_to_blocks(raw)
         if not blocks:
             blocks = [TextBlock(text=raw.strip())]
-        return AssistantResponse(voice=voice, screen=ScreenData(blocks=blocks))
+        used: List[str] = []
+        if available_sources:
+            try:
+                from ui_automation import sources as _sources
+                joined = "\n".join(
+                    [voice] +
+                    [b.text for b in blocks if isinstance(b, TextBlock)]
+                )
+                used = _sources.filter_used(joined)
+            except Exception:
+                used = []
+        return AssistantResponse(voice=voice, screen=ScreenData(blocks=blocks),
+                                 used_sources=used)
 
     @staticmethod
     def _markdown_to_blocks(raw: str) -> List[Block]:

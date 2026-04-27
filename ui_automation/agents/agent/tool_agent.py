@@ -609,9 +609,9 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
                 print(f"  → {preview}", flush=True)
 
                 # Источники — только то, что реально цитируется.
-                # tavily_search — первичные результаты поиска (оттуда агент берёт факты).
-                # extract/crawl/map выдают навигационные карты страниц — это шум, не источники.
-                if fn_name == "tavily_search":
+                # web_search — первичные результаты поиска (оттуда агент берёт факты).
+                # extract выдаёт сырой текст страниц — добавляем тоже.
+                if fn_name in ("web_search", "web_extract"):
                     _sources.add_from_text(result)
 
                 messages.append({

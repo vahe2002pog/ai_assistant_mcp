@@ -47,7 +47,12 @@ mcp>=1.26.0
 fastmcp>=3.1.1
 
 # ── Web / Search (MCP tools) ─────────────────────────────────────────────────
-tavily-python>=0.7.0
+ddgs>=9.0.0
+scrapling>=0.2.9
+curl_cffi>=0.7.0
+playwright>=1.45.0
+lxml>=5.0.0
+browserforge>=1.2.0
 
 # ── File Operations (MCP tools) ───────────────────────────────────────────────
 Send2Trash>=2.1.0

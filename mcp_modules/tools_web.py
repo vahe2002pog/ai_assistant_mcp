@@ -1,251 +1,321 @@
-from tavily import TavilyClient
-from .mcp_core import mcp
-import os
+from __future__ import annotations
+
+import subprocess
+import sys
 import threading
 import urllib.parse
-from config import TAVILY_API_KEY
+from typing import Any
 
-# Singleton-клиент (иначе на каждый вызов — новый HTTP-клиент и новый пул).
-_CLIENT = None
-_CLIENT_LOCK = threading.Lock()
-# Глобальный таймаут для всех tavily-запросов (сек).
-_TAVILY_TIMEOUT = 15
+from .mcp_core import mcp
 
 
-def _get_client():
-    global _CLIENT
-    if _CLIENT is not None:
-        return _CLIENT
-    with _CLIENT_LOCK:
-        if _CLIENT is None:
-            _CLIENT = TavilyClient(api_key=TAVILY_API_KEY)
-    return _CLIENT
+_DEFAULT_TIMEOUT = 15
+_TEXT_LIMIT = 8000
+_IGNORE_TAGS = ("script", "style", "nav", "footer", "noscript", "aside")
+
+# Браузеры Scrapling (Playwright) ставятся отдельной командой `scrapling install`.
+# Делаем это лениво, один раз за процесс, если фетч упал из-за отсутствия браузера.
+_SCRAPLING_BOOTSTRAPPED = False
+_SCRAPLING_LOCK = threading.Lock()
+
+
+def _looks_like_missing_browser(err: BaseException) -> bool:
+    msg = (str(err) or "").lower()
+    return any(s in msg for s in (
+        "executable doesn't exist",
+        "playwright install",
+        "browsertype.launch",
+        "looks like playwright",
+        "no such file",
+    ))
+
+
+def _missing_module_name(err: BaseException) -> str | None:
+    """Возвращает имя пакета из 'No module named X', иначе None."""
+    if isinstance(err, ModuleNotFoundError) and err.name:
+        return err.name
+    msg = str(err) or ""
+    marker = "No module named "
+    if marker in msg:
+        tail = msg.split(marker, 1)[1].strip().strip("'\"")
+        return tail.split(".")[0] if tail else None
+    return None
+
+
+# Какие пакеты ставить под какие отсутствующие модули.
+_MODULE_TO_PIP = {
+    "curl_cffi": "curl_cffi",
+    "playwright": "playwright",
+    "lxml": "lxml",
+    "browserforge": "browserforge",
+    "tldextract": "tldextract",
+    "msgspec": "msgspec",
+    "camoufox": "camoufox",
+}
+
+
+def _ensure_pip_module(mod: str) -> tuple[bool, str]:
+    pip_name = _MODULE_TO_PIP.get(mod, mod)
+    print(f"[web] pip install {pip_name} — ставлю недостающий пакет…", flush=True)
+    return _run([sys.executable, "-m", "pip", "install", pip_name])
+
+
+def _run(cmd: list[str], timeout: int = 600) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception as ex:
+        return False, f"запуск {cmd!r} не удался: {ex}"
+    return proc.returncode == 0, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _ensure_playwright_module() -> tuple[bool, str]:
+    """Гарантирует, что пакет playwright установлен в текущий venv."""
+    try:
+        import playwright  # noqa: F401
+        return True, "already installed"
+    except ImportError:
+        pass
+    print("[web] pip install playwright — ставлю недостающий пакет…", flush=True)
+    return _run([sys.executable, "-m", "pip", "install", "playwright"])
+
+
+def _bootstrap_scrapling() -> tuple[bool, str]:
+    """Один раз за процесс ставит playwright + браузеры. Возвращает (ok, log)."""
+    global _SCRAPLING_BOOTSTRAPPED
+    with _SCRAPLING_LOCK:
+        if _SCRAPLING_BOOTSTRAPPED:
+            return True, "already bootstrapped"
+
+        ok, log_pw = _ensure_playwright_module()
+        if not ok:
+            return False, f"playwright pip install: {log_pw}"
+
+        print("[web] scrapling install — устанавливаю браузеры (одноразово)…", flush=True)
+        ok, log_sc = _run([sys.executable, "-m", "scrapling", "install"])
+        if not ok:
+            # Фолбэк: ставим браузеры напрямую через playwright.
+            print("[web] scrapling install упал, пробую `playwright install chromium`…", flush=True)
+            ok, log_sc = _run([sys.executable, "-m", "playwright", "install", "chromium"])
+
+        if ok:
+            _SCRAPLING_BOOTSTRAPPED = True
+        return ok, log_pw + "\n" + log_sc
+
+
+_DDG_OPERATORS = ("site:", "intitle:", "inurl:", "filetype:", " OR ", " AND ", "-", '"')
+
+
+def _build_ddg_query(query: str, exact_phrase: bool) -> str:
+    """Если exact_phrase=True и в запросе ещё нет операторов/кавычек — оборачиваем
+    его в "...", чтобы DDG требовал точного вхождения фразы. Это сильно снижает
+    мусорные совпадения по одному слову (словари, омонимы, неподходящие сайты)."""
+    q = (query or "").strip()
+    if not exact_phrase or not q:
+        return q
+    if any(op in q for op in _DDG_OPERATORS):
+        return q  # пользователь/LLM уже задали операторы — не вмешиваемся
+    if len(q.split()) < 2:
+        return q  # одно слово в кавычках — бессмысленно
+    return f'"{q}"'
+
+
+def _ddg_search(query: str, max_results: int, region: str = "wt-wt",
+                safesearch: str = "moderate") -> list[dict[str, Any]]:
+    """Возвращает [{title, href, body}, ...] из DuckDuckGo (через пакет ddgs).
+
+    В fallback пробуем устаревший duckduckgo_search — но его Bing-фолбэк
+    отдаёт мусор, так что основная ставка на ddgs."""
+    try:
+        from ddgs import DDGS  # новый пакет (ранее duckduckgo_search)
+    except ImportError:
+        from duckduckgo_search import DDGS  # type: ignore
+    return list(DDGS().text(query, max_results=max_results,
+                            region=region, safesearch=safesearch) or [])
+
+
+def _do_scrape(url: str, timeout: int, stealthy: bool):
+    if stealthy:
+        from scrapling.fetchers import StealthyFetcher
+        return StealthyFetcher.fetch(url, headless=True, network_idle=True, timeout=timeout * 1000)
+    from scrapling.fetchers import Fetcher
+    return Fetcher.get(url, timeout=timeout)
+
+
+_INSTALLED_MODS: set[str] = set()
+
+
+def _scrape_text(url: str, timeout: int = _DEFAULT_TIMEOUT, stealthy: bool = False) -> str:
+    """Скачивает страницу через Scrapling и возвращает чистый текст.
+
+    Лениво доставляет недостающие зависимости (curl_cffi, playwright, lxml)
+    и playwright-браузеры — каждую максимум один раз за процесс.
+    """
+    for _ in range(4):
+        try:
+            page = _do_scrape(url, timeout, stealthy)
+            return page.get_all_text(ignore_tags=_IGNORE_TAGS) or ""
+        except Exception as ex:
+            mod = _missing_module_name(ex)
+            if mod and mod in _MODULE_TO_PIP and mod not in _INSTALLED_MODS:
+                ok, log = _ensure_pip_module(mod)
+                _INSTALLED_MODS.add(mod)
+                if not ok:
+                    raise RuntimeError(f"pip install {mod} не удался: {log.strip()[:400]}") from ex
+                continue
+            if stealthy and not _SCRAPLING_BOOTSTRAPPED and _looks_like_missing_browser(ex):
+                ok, log = _bootstrap_scrapling()
+                if not ok:
+                    raise RuntimeError(f"scrapling install не удался: {log.strip()[:400]}") from ex
+                continue
+            raise
+    raise RuntimeError("scrape: исчерпан лимит автоустановок зависимостей")
 
 
 @mcp.tool
-def tavily_search(query: str, max_results: int = 3, search_depth: str = "basic") -> str:
+def web_search(query: str, max_results: int = 3, fetch_pages: bool = True,
+               char_limit: int = _TEXT_LIMIT,
+               exact_phrase: bool = True,
+               region: str = "wt-wt", safesearch: str = "moderate") -> str:
     """
-    Выполняет поисковый запрос в интернете и возвращает релевантные, сжатые результаты,
-    часто с фрагментами текста и ссылками.
+    Ищет информацию в интернете: DuckDuckGo выдаёт список URL и сниппетов,
+    Scrapling загружает каждую страницу и извлекает чистый текст.
 
-    Важно: обычно сниппетов из результата достаточно для ответа. Вызывай tavily_extract
-    только если сниппетов явно не хватает для конкретного факта.
+    Используй для любых вопросов, требующих актуальных данных (новости, цены,
+    курсы, факты). Сниппеты обычно достаточны; полный текст подгружается, если
+    fetch_pages=True (по умолчанию).
+
+    exact_phrase=True (по умолчанию) оборачивает многословный запрос в кавычки —
+    DDG требует точного вхождения фразы и реже выдаёт нерелевантные страницы
+    (словари, омонимы). Отключи только если ищешь по отдельным ключевым словам.
+
+    region: 'wt-wt' (мир), 'ru-ru', 'us-en' и т.п. — задаёт регион выдачи.
 
     Args:
         query (str): Поисковый запрос.
-        max_results (int): Количество результатов (по умолчанию 3, максимум 10).
-        search_depth (str): Глубина поиска:
-            "basic"    — быстрый поиск (1–2 сек, по умолчанию).
-            "advanced" — глубокий поиск с суммаризацией (5–15 сек, использовать только
-                         если "basic" не дал релевантных сниппетов).
+        max_results (int): Сколько результатов вернуть (по умолчанию 3, рекомендуется ≤5).
+        fetch_pages (bool): Если True — догружает полный текст каждой страницы.
+                            Если False — возвращает только сниппеты DDG (быстро).
 
     Returns:
-        str: Текст с результатами поиска.
+        str: Текст с результатами (заголовок, URL, сниппет, при fetch_pages — текст страницы).
     """
-    print(f"Вызван tavily_search с query: {query}, max_results: {max_results}, search_depth: {search_depth}")
+    ddg_query = _build_ddg_query(query, exact_phrase)
+    print(f"Вызван web_search query={ddg_query!r} max_results={max_results} "
+          f"fetch_pages={fetch_pages} region={region}")
     try:
-        if not TAVILY_API_KEY:
-            return "Ошибка: TAVILY_API_KEY не установлен."
+        hits = _ddg_search(ddg_query, max_results, region=region, safesearch=safesearch)
+    except Exception as e:
+        return f"Ошибка DuckDuckGo: {e}"
 
-        client = _get_client()
-        response = client.search(
-            query=query,
-            max_results=max_results,
-            search_depth=search_depth,
-            timeout=_TAVILY_TIMEOUT,
-        )
-
-        raw_results = response.get("results", []) or []
-        # Фоновое сохранение в RAG — не блокирует ответ.
+    # Фолбэк: если точная фраза ничего не дала — повторяем без кавычек.
+    if not hits and exact_phrase and ddg_query != query:
         try:
-            from ui_automation.rag.web_search_manager import save_search_results_async
-            save_search_results_async(query, raw_results, source="tavily_search")
+            hits = _ddg_search(query, max_results, region=region, safesearch=safesearch)
         except Exception:
             pass
 
-        results = []
-        for r in raw_results:
-            title = r.get("title", "Нет заголовка")
-            href = r.get("url", "")
-            body = r.get("content", "Нет описания")
-            score = r.get("score", 0)
-            
-            results.append(f"📌 {title} (Score: {score})\n🔗 {href}\n📝 {body}\n")
-            
-        if not results:
-            return f"По запросу '{query}' ничего не найдено."
-            
-        return f"Результаты поиска Tavily по запросу '{query}':\n\n" + "\n".join(results)
-        
-    except Exception as e:
-        return f"Ошибка при поиске Tavily: {e}"
+    if not hits:
+        return f"По запросу '{query}' ничего не найдено."
+
+    raw_results: list[dict[str, Any]] = []
+    blocks: list[str] = []
+    for r in hits:
+        title = r.get("title") or "Без заголовка"
+        href = r.get("href") or r.get("url") or ""
+        snippet = r.get("body") or ""
+
+        full_text = ""
+        if fetch_pages and href:
+            try:
+                full_text = _scrape_text(href)[:char_limit]
+            except Exception as ex:
+                full_text = f"(не удалось загрузить: {ex})"
+
+        raw_results.append({
+            "title": title,
+            "url": href,
+            "content": snippet,
+            "full_text": full_text,
+        })
+
+        block = f"📌 {title}\n🔗 {href}\n📝 {snippet}"
+        if full_text:
+            block += f"\n📄 {full_text}"
+        blocks.append(block + "\n")
+
+    try:
+        from ui_automation.rag.web_search_manager import save_search_results_async
+        save_search_results_async(query, raw_results, source="web_search")
+    except Exception:
+        pass
+
+    return f"Результаты поиска по запросу '{query}':\n\n" + "\n".join(blocks)
 
 
 @mcp.tool
-def tavily_extract(urls: list[str]) -> str:
+def web_extract(urls: list[str], stealthy: bool = False,
+                char_limit: int = _TEXT_LIMIT) -> str:
     """
-    Этот инструмент позволяет получить полное содержимое одного или нескольких указанных URL-адресов, 
-    возвращая чистый текст или разметку Markdown с веб-страниц. Это инструмент для прямого веб-скрейпинга.
-    
-    Args:
-        urls (list[str]): Список URL-адресов для извлечения.
-        
-    Returns:
-        str: Извлеченный контент в формате Markdown.
-    """
-    print(f"Вызван tavily_extract с urls: {urls}")
-    try:
-        if not TAVILY_API_KEY:
-            return "Ошибка: TAVILY_API_KEY не установлен."
-        
-        client = _get_client()
-        response = client.extract(urls=urls, timeout=_TAVILY_TIMEOUT)
+    Загружает указанные URL и возвращает их чистый текст (без скриптов/nav/footer).
+    Прямой веб-скрейпинг через Scrapling.
 
-        raw_items = response.get("results", []) or []
+    Args:
+        urls (list[str]): Список URL для извлечения.
+        stealthy (bool): Если True — использует StealthyFetcher (Playwright со stealth)
+                         для сайтов с антибот-защитой (Cloudflare и т.п.). Медленнее.
+
+    Returns:
+        str: Извлечённый текст по каждому URL.
+    """
+    print(f"Вызван web_extract urls={urls} stealthy={stealthy}")
+    if not urls:
+        return "Ошибка: список URL пуст."
+
+    raw_items: list[dict[str, Any]] = []
+    blocks: list[str] = []
+    for url in urls:
         try:
-            from ui_automation.rag.web_search_manager import save_extract_results
-            save_extract_results(urls, raw_items)
-        except Exception:
-            pass
+            text = _scrape_text(url, stealthy=stealthy)
+        except Exception as ex:
+            blocks.append(f"🔗 {url}\n❌ Ошибка: {ex}\n")
+            continue
+        raw_items.append({"url": url, "content": text})
+        blocks.append(f"🔗 {url}\n📄 {text[:char_limit]}\n")
 
-        results = []
-        for item in raw_items:
-            url = item.get("url", "")
-            content = item.get("content", "Нет контента")
-            results.append(f"🔗 {url}\n📄 {content}\n")
-            
-        if not results:
-            return "Не удалось извлечь контент."
-
-        return "Извлеченный контент:\n\n" + "\n".join(results)
-    except Exception as e:
-        return f"Ошибка при извлечении: {e}"
-
-
-@mcp.tool
-def tavily_crawl(url: str, max_requests_per_minute: int = 10) -> str:
-    """
-    Более мощный веб-сканер на основе графов, который систематически исследует весь веб-сайт 
-    (например, сайт документации или базу знаний), переходя по ссылкам и извлекая контент параллельно 
-    для создания исчерпывающей карты сайта или набора данных.
-    
-    Args:
-        url (str): URL сайта для сканирования.
-        max_requests_per_minute (int): Максимальное количество запросов в минуту (по умолчанию 10).
-        
-    Returns:
-        str: Карта сайта с извлеченным контентом.
-    """
-    print(f"Вызван tavily_crawl с url: {url}, max_requests_per_minute: {max_requests_per_minute}")
     try:
-        if not TAVILY_API_KEY:
-            return "Ошибка: TAVILY_API_KEY не установлен."
-        
-        client = _get_client()
-        response = client.crawl(
-            url=url,
-            max_requests_per_minute=max_requests_per_minute,
-            timeout=_TAVILY_TIMEOUT * 4,
-        )
-        
-        results = []
-        for item in response.get("results", []):
-            page_url = item.get("url", "")
-            content = item.get("content", "Нет контента")
-            results.append(f"🔗 {page_url}\n📄 {content}...\n")  # Ограничим для краткости
-            
-        if not results:
-            return "Не удалось просканировать сайт."
-            
-        return f"Карта сайта {url}:\n\n" + "\n".join(results)
-        
-    except Exception as e:
-        return f"Ошибка при сканировании: {e}"
+        from ui_automation.rag.web_search_manager import save_extract_results
+        save_extract_results(urls, raw_items)
+    except Exception:
+        pass
 
-
-@mcp.tool
-def tavily_map(url: str, max_pages: int = 100) -> str:
-    """
-    Программа осуществляет обход веб-сайтов для создания структурированной карты содержимого сайта 
-    с целью интеллектуального поиска.
-    
-    Args:
-        url (str): URL сайта для создания карты.
-        max_pages (int): Максимальное количество страниц (по умолчанию 100).
-        
-    Returns:
-        str: Структурированная карта сайта.
-    """
-    print(f"Вызван tavily_map с url: {url}, max_pages: {max_pages}")
-    try:
-        if not TAVILY_API_KEY:
-            return "Ошибка: TAVILY_API_KEY не установлен."
-        
-        client = _get_client()
-        response = client.map(url=url, max_pages=max_pages, timeout=_TAVILY_TIMEOUT * 2)
-        
-        results = []
-        for item in response.get("results", []):
-            page_url = item.get("url", "")
-            title = item.get("title", "Нет заголовка")
-            results.append(f"📌 {title}\n🔗 {page_url}\n")
-            
-        if not results:
-            return "Не удалось создать карту сайта."
-            
-        return f"Карта сайта {url}:\n\n" + "\n".join(results)
-        
-    except Exception as e:
-        return f"Ошибка при создании карты: {e}"
+    if not blocks:
+        return "Не удалось извлечь контент."
+    return "Извлечённый контент:\n\n" + "\n".join(blocks)
 
 
 @mcp.tool
 def open_url(url: str) -> str:
     """
     Открывает указанный URL-адрес или веб-сайт в браузере пользователя по умолчанию.
-    
+
     Используй этот инструмент, если пользователь просит:
     - "Открой ютуб"
     - "Зайди на википедию"
     - "Покажи мне сайт github.com"
-    
+
     Args:
-        url (str): Полный URL-адрес (например, 'https://youtube.com', 'https://ya.ru') 
+        url (str): Полный URL-адрес (например, 'https://youtube.com', 'https://ya.ru')
                    или просто домен ('vk.com').
-                   
+
     Returns:
         str: Сообщение о том, что команда на открытие отправлена.
     """
-    # Небольшая санитария: если агент передал просто "youtube.com", добавляем https://
     clean_url = url.strip()
     if not clean_url.startswith(('http://', 'https://')):
         clean_url = f"https://{clean_url}"
-        
-    # Базовая валидация URL, чтобы убедиться, что это похоже на ссылку
+
     parsed = urllib.parse.urlparse(clean_url)
     if not parsed.netloc:
         return f"Ошибка: '{url}' не похоже на корректный веб-адрес."
 
-    # Возвращаем СПЕЦИАЛЬНУЮ команду, которую перехватит main.py (как с файлами)
     return f"__OPEN_URL_COMMAND__:{clean_url}"
-
-
-@mcp.tool
-def browser_search(query: str) -> str:
-    """
-    Запускает поиск в системном браузере и поисковике по умолчанию (Google).
-
-    Этот инструмент полезен, когда DuckDuckGo в `web_search` вернул неудовлетворительный
-    ответ и нужно показать полные результаты поиска непосредственно пользователю.
-
-    Args:
-        query (str): Строка поиска, например "какая погода" или "openai gpt".
-
-    Returns:
-        str: Специальная команда для main.py, которая откроет поиск в браузере.
-    """
-    if not isinstance(query, str) or not query.strip():
-        return "Ошибка: запрос должен быть непустой строкой."
-    # Используем Google как основной поисковик по умолчанию
-    url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
-    return f"__OPEN_URL_COMMAND__:{url}"

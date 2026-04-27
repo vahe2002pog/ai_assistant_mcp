@@ -24,13 +24,13 @@ _WEB_SYSTEM_PROMPT = """/no_think
 Ты — веб-агент. Ищешь информацию в интернете и проверяешь погоду.
 
 Инструменты:
-- tavily_search(query, search_depth="basic") — быстрый поиск, сниппеты + ссылки.
-- tavily_extract — полный текст страницы (только если сниппетов не хватает).
+- web_search(query, max_results=3, fetch_pages=True) — DuckDuckGo + извлечение текста страниц через Scrapling.
+- web_extract(urls, stealthy=False) — полный текст конкретных URL (stealthy=True для антибот-сайтов).
 - get_weather — погода для города.
 
 ПРАВИЛА:
-1. tavily_search(search_depth="basic") — дефолт (1–2 сек). advanced — ТОЛЬКО если basic не помог.
-2. Не вызывай open_url/browser_search для поиска — только если пользователь явно попросил открыть ссылку.
+1. web_search с fetch_pages=True — дефолт. fetch_pages=False — только если нужны быстрые сниппеты.
+2. Не вызывай open_url/browser_search_google для поиска — только если пользователь явно попросил открыть ссылку.
 3. После ответа — task_done(summary="краткий ответ пользователю").
 """
 
@@ -246,8 +246,12 @@ class HostAgent:
                 raw_for_formatter = best
 
         from ui_automation.agents.agent.response_formatter import ResponseFormatter
+        from ui_automation import sources as _sources
         raw_for_formatter = _strip_task_done(raw_for_formatter)
-        response = ResponseFormatter().format(raw_for_formatter, user_query=task)
+        response = ResponseFormatter().format(
+            raw_for_formatter, user_query=task,
+            available_sources=_sources.items(),
+        )
         utils.print_with_color(f"[HostAgent] voice: {response.voice}", "cyan")
         return response
 

@@ -41,8 +41,8 @@ os.makedirs(_ATTACH_DIR, exist_ok=True)
 
 # ── Карты: инструмент/агент → человекочитаемая фраза ─────────────────────
 _TOOL_STATUS = {
-    "tavily_search": "Ищу в интернете…",
-    "tavily_extract": "Читаю страницу…",
+    "web_search": "Ищу в интернете…",
+    "web_extract": "Читаю страницу…",
     "open_app": "Запускаю приложение…",
     "open_url": "Открываю ссылку…",
     "open_bookmark": "Открываю закладку…",
@@ -266,6 +266,31 @@ def _build_chat_history(conv_id: Optional[int], skip_last_user: bool = True,
     return text
 
 
+def _flatten_answer_text(out: dict) -> str:
+    """Собирает весь текст из voice + всех блоков screen — нужен для фильтрации источников."""
+    parts: list[str] = []
+    parts.append(out.get("voice") or "")
+    for b in (out.get("screen") or {}).get("blocks") or []:
+        if not isinstance(b, dict):
+            continue
+        if b.get("title"):
+            parts.append(str(b["title"]))
+        t = b.get("type")
+        if t == "text":
+            parts.append(str(b.get("text") or ""))
+        elif t == "list":
+            parts.extend(str(x) for x in (b.get("items") or []))
+        elif t == "table":
+            for row in b.get("rows") or []:
+                if isinstance(row, dict):
+                    parts.extend(f"{k}: {v}" for k, v in row.items())
+        elif t == "links":
+            parts.extend(str(x) for x in (b.get("links") or []))
+        elif t == "files":
+            parts.extend(str(x) for x in (b.get("file_paths") or []))
+    return "\n".join(parts)
+
+
 def _dispatch(message: str, conv_id: Optional[int] = None) -> dict:
     if not _HOST_READY.wait(timeout=120):
         return {"voice": "[Ошибка] HostAgent не инициализирован.", "screen": {"blocks": []}}
@@ -302,9 +327,16 @@ def _dispatch(message: str, conv_id: Optional[int] = None) -> dict:
             out = {"voice": str(result), "screen": {"blocks": []}}
 
         # Если агенты использовали веб-поиск — добавим блок «Источники».
-        urls = _sources.collect()
-        if urls:
+        if _sources.items():
             blocks = out.setdefault("screen", {"blocks": []}).setdefault("blocks", [])
+            # 1) Приоритет — used_sources от LLM-форматтера (он знает, какие
+            # факты откуда взял). 2) Если поля нет — фолбэк на эвристику.
+            llm_used = out.pop("used_sources", None)
+            if llm_used:
+                known = {it["url"] for it in _sources.items()}
+                urls = [u for u in llm_used if u in known]
+            else:
+                urls = _sources.filter_used(_flatten_answer_text(out))
             # Не дублируем, если форматтер уже вернул links-блок с этими URL.
             existing = set()
             for b in blocks:
