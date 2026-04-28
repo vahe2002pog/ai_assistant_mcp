@@ -23,3 +23,4 @@ js.py
 rag_gen.py
 vba_corpus.json
 .env
+llm_config.json
