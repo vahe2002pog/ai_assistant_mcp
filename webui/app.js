@@ -68,8 +68,8 @@ function refreshSendBtn() {
   }
   inputEl.disabled = showStop;
   inputEl.placeholder = showStop
-    ? "Дождись ответа или прерви запрос…"
-    : "Напиши сообщение…";
+    ? "Дождитесь ответа или прервите запрос…"
+    : "Напишите сообщение…";
 }
 
 function autosize() {
@@ -217,13 +217,72 @@ function renderBlock(b) {
     }
     case "files": {
       const ul = el("ul", "block-files");
-      (b.file_paths || []).forEach(p => ul.appendChild(el("li", "", p)));
+      (b.file_paths || []).forEach(p => {
+        const li = el("li", "file-row");
+        li.appendChild(makeFileLink(p));
+        const btn = el("button", "file-reveal", "📂");
+        btn.type = "button";
+        btn.title = "Показать в проводнике";
+        btn.addEventListener("click", (e) => {
+          e.preventDefault(); e.stopPropagation();
+          openLocalFile(p, true);
+        });
+        li.appendChild(btn);
+        ul.appendChild(li);
+      });
       box.appendChild(ul); break;
     }
     default: return null;
   }
   return box;
 }
+
+// ── Локальные файлы: кликабельные ссылки ────────────────────────────
+const LOCAL_PATH_RE = /(?:(?<![A-Za-z])[A-Za-z]:[\\/]|\\\\[^\s\\/<>"'|?*]+\\)[^\s<>"'|?*]+[^\s<>"'|?*.,;:!?)\]]/g;
+
+async function openLocalFile(path, reveal = false) {
+  try {
+    await fetch("/api/open-file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, reveal: !!reveal }),
+    });
+  } catch (_) {}
+}
+
+function makeFileLink(path) {
+  const a = document.createElement("a");
+  a.href = "#";
+  a.className = "file-link";
+  a.textContent = path;
+  a.title = "ЛКМ — открыть, Ctrl+ЛКМ — показать в проводнике";
+  a.addEventListener("click", (e) => {
+    e.preventDefault();
+    openLocalFile(path, e.ctrlKey || e.metaKey || e.shiftKey);
+  });
+  return a;
+}
+
+function linkifyPaths(html) {
+  // Заменяем абсолютные локальные пути в готовом HTML на <a class="file-link" data-path="...">.
+  // Не трогаем то, что уже внутри <a>...</a> или <code>...</code>.
+  return html.replace(
+    /(<(a|code)\b[^>]*>[\s\S]*?<\/\2>)|((?:(?<![A-Za-z])[A-Za-z]:[\\\/]|\\\\[^\s\\\/<>"'|?*]+\\)[^\s<>"'|?*]+[^\s<>"'|?*.,;:!?)\]])/g,
+    (m, tagged, _t, path) => {
+      if (tagged) return tagged;
+      const safe = String(path).replace(/"/g, "&quot;");
+      return `<a href="#" class="file-link" data-path="${safe}" title="ЛКМ — открыть, Ctrl+ЛКМ — показать в проводнике">${path}</a>`;
+    },
+  );
+}
+
+// Делегированный обработчик для ссылок, добавленных через innerHTML.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest && e.target.closest("a.file-link[data-path]");
+  if (!a) return;
+  e.preventDefault();
+  openLocalFile(a.dataset.path, e.ctrlKey || e.metaKey || e.shiftKey);
+});
 
 function escHtml(s) {
   return String(s).replace(/[&<>"']/g, c => (
@@ -242,7 +301,7 @@ function inlineMarkdown(src) {
   s = s.replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
   s = s.replace(/(^|[\s(])(https?:\/\/[^\s<]+)/g,
     (_, pre, u) => `${pre}<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
-  return s;
+  return linkifyPaths(s);
 }
 
 function renderMarkdown(src) {
@@ -344,7 +403,7 @@ function renderMarkdown(src) {
     }
     out.push(`<p>${buf.map(x => inline(esc(x))).join("<br>")}</p>`);
   }
-  return out.join("");
+  return linkifyPaths(out.join(""));
 }
 
 function setStatus(text) {

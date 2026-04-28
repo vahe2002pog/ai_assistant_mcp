@@ -7,6 +7,7 @@ from typing import Any, Dict
 import openai
 
 from ui_automation import utils, llm_config as _llm
+from ui_automation import touched_files as _touched
 from ui_automation.agents.memory.blackboard import Blackboard
 from ui_automation.agents.contracts import (
     AgentType, ErrorClass, ErrorInfo, ExecutionTrace, Plan,
@@ -19,19 +20,42 @@ from ui_automation.agents.trace_store import TraceStore
 from ui_automation.agents.agent.tool_agent import _strip_task_done_mentions as _strip_task_done
 
 # Web-инструменты HostAgent использует сам, без отдельного подагента.
-_WEB_TOOLS_MODULES = ["mcp_modules.tools_web", "mcp_modules.tools_weather"]
+_WEB_TOOLS_MODULES = [
+    "mcp_modules.tools_web",
+    "mcp_modules.tools_weather",
+    "mcp_modules.tools_bookmarks",
+]
 _WEB_SYSTEM_PROMPT = """/no_think
-Ты — веб-агент. Ищешь информацию в интернете и проверяешь погоду.
+Ты — веб-агент. Ищешь информацию в интернете, открываешь сайты/закладки и проверяешь погоду.
 
 Инструменты:
+- open_url(url) — открывает сайт/ссылку в браузере по умолчанию.
+- search_bookmarks(query) — ищет в сохранённых закладках браузеров пользователя.
+- open_bookmark(query) — открывает закладку по названию/части URL.
 - web_search(query, max_results=3, fetch_pages=True) — DuckDuckGo + извлечение текста страниц через Scrapling.
 - web_extract(urls, stealthy=False) — полный текст конкретных URL (stealthy=True для антибот-сайтов).
 - get_weather — погода для города.
 
 ПРАВИЛА:
-1. web_search с fetch_pages=True — дефолт. fetch_pages=False — только если нужны быстрые сниппеты.
-2. Не вызывай open_url/browser_search_google для поиска — только если пользователь явно попросил открыть ссылку.
-3. После ответа — task_done(summary="краткий ответ пользователю").
+1. Если пользователь просит ОТКРЫТЬ сайт/ссылку («открой ютуб», «зайди на
+   википедию», «покажи github.com», «открой https://…»):
+   а) если это известный/популярный сайт — сразу open_url с каноническим
+      доменом (youtube.com, wikipedia.org, vk.com и т.п.);
+   б) если название НЕ узнаёшь (внутренний/корпоративный/личный ресурс,
+      незнакомое слово, аббревиатура) — СНАЧАЛА search_bookmarks(query)
+      или open_bookmark(query). Если закладка нашлась — открывай её URL.
+      Не угадывай домен наобум.
+   в) если в закладках ничего не найдено и ты не уверен в домене —
+      сделай web_search по названию сайта, возьми официальный URL из
+      первого релевантного результата и ОБЯЗАТЕЛЬНО открой его через
+      open_url. Не оставляй задачу на этапе «вот ссылка» — пользователь
+      просил открыть.
+   НЕ делай web_search для популярных сайтов, которые знаешь.
+2. web_search с fetch_pages=True — дефолт для поиска информации.
+   fetch_pages=False — только если нужны быстрые сниппеты.
+3. Не вызывай open_url для поиска информации — только когда пользователь
+   явно просит открыть сайт/ссылку.
+4. После ответа — task_done(summary="краткий ответ пользователю").
 """
 
 _CHAT_SYSTEM_PROMPT = (
@@ -165,6 +189,9 @@ class HostAgent:
            them one after another, passing the previous result as context.
         4. Returns combined summary.
         """
+        # Сбрасываем сборщик «затронутых файлов» — каждый dispatch начинается с чистого листа.
+        _touched.reset()
+
         bb_ctx = self._blackboard_context(conv_id)
         if bb_ctx:
             context_hint = f"[История предыдущих задач]\n{bb_ctx}\n\n" + context_hint
@@ -228,6 +255,7 @@ class HostAgent:
             voice_text = "\n\n".join(chat_answers) if chat_answers else final
             voice_text = _strip_task_done(voice_text)
             response = AssistantResponse(voice=voice_text)
+            _attach_files_block(response, voice_text)
             utils.print_with_color(f"[HostAgent] voice: {response.voice}", "cyan")
             return response
 
@@ -252,6 +280,7 @@ class HostAgent:
             raw_for_formatter, user_query=task,
             available_sources=_sources.items(),
         )
+        _attach_files_block(response, raw_for_formatter)
         utils.print_with_color(f"[HostAgent] voice: {response.voice}", "cyan")
         return response
 
@@ -326,6 +355,68 @@ class HostAgent:
             "agent": step.agent.value,
             "result": (r.summary or ""),
         })
+
+
+def _attach_files_block(response, raw_text: str = "") -> None:
+    """Подмешивает FilesBlock в response.screen.blocks с путями, которые:
+       1) ассистент трогал инструментами (touched_files);
+       2) явно упомянуты в финальном тексте (на случай «дай путь к файлу»).
+    Если такой блок уже есть — расширяет его. Дедуп по нормализованному пути."""
+    from ui_automation.agents.agent.response_formatter import FilesBlock
+
+    # Промоутим кандидатов (видели через list_directory), если их имена
+    # упоминаются в финальном ответе.
+    voice_text = getattr(response, "voice", "") or ""
+    blocks_text_parts = [voice_text, raw_text or ""]
+    for b in response.screen.blocks:
+        if hasattr(b, "text"):
+            blocks_text_parts.append(getattr(b, "text", "") or "")
+        if hasattr(b, "items"):
+            blocks_text_parts.extend(str(x) for x in (getattr(b, "items", []) or []))
+    _touched.promote_candidates_from_text("\n".join(blocks_text_parts))
+
+    touched = _touched.items()
+    text_paths = _touched.extract_paths_from_text(raw_text or "")
+    text_paths += _touched.extract_paths_from_text(getattr(response, "voice", "") or "")
+
+    seen: set = set()
+    entries: list = []  # list of dict: {"path", "action"}
+    for it in touched:
+        p = os.path.normpath(it["path"])
+        if p in seen:
+            continue
+        seen.add(p)
+        entries.append({"path": p, "action": it.get("action") or ""})
+    for p in text_paths:
+        try:
+            np = os.path.normpath(p)
+        except Exception:
+            np = p
+        if np in seen:
+            continue
+        seen.add(np)
+        entries.append({"path": np, "action": ""})
+
+    if not entries:
+        return
+
+    # Если уже есть files-блок от форматтера — дополним его, а не дублируем.
+    existing: FilesBlock | None = None
+    for b in response.screen.blocks:
+        if isinstance(b, FilesBlock):
+            existing = b
+            break
+    if existing is not None:
+        already = {os.path.normpath(p) for p in existing.file_paths}
+        for e in entries:
+            if e["path"] not in already:
+                existing.file_paths.append(e["path"])
+        return
+
+    response.screen.blocks.append(FilesBlock(
+        file_paths=[e["path"] for e in entries],
+        title="Файлы",
+    ))
 
 
 def _save_experience_async(task: str, result: str, agent_types: list) -> None:

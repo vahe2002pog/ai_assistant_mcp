@@ -665,3 +665,21 @@ span.spinner {
   .sidebar { display: none; }
   .vault-body { grid-template-columns: 1fr; }
 }
+
+/* ── Кликабельные пути к локальным файлам ───────────────────────── */
+a.file-link {
+  color: var(--accent, #2e7d32);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  cursor: pointer;
+  word-break: break-all;
+}
+a.file-link:hover { text-decoration-style: solid; }
+.block-files .file-row {
+  display: flex; align-items: center; gap: 6px; padding: 2px 0;
+}
+.block-files .file-reveal {
+  background: transparent; border: none; cursor: pointer;
+  font-size: 14px; padding: 2px 6px; opacity: 0.6;
+}
+.block-files .file-reveal:hover { opacity: 1; }

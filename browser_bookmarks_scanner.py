@@ -107,22 +107,34 @@ def _parse_chromium_node(node: dict, folder: str, results: list) -> None:
 
 
 def _scan_chromium_profile(profile_dir: str) -> list:
-    bm_file = os.path.join(profile_dir, "Bookmarks")
-    if not os.path.isfile(bm_file):
-        return []
-    try:
-        with open(bm_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return []
-    roots = data.get("roots") or {}
-    results = []
-    for root_key in ("bookmark_bar", "other", "synced", "mobile"):
-        root_node = roots.get(root_key)
-        if root_node:
+    # У залогиненных пользователей Chrome/Edge синхронизированные закладки
+    # лежат в AccountBookmarks, а локальный Bookmarks может быть пустым.
+    # Читаем оба файла и дедуплицируем по URL.
+    results: list = []
+    seen: set = set()
+    for fname in ("Bookmarks", "AccountBookmarks"):
+        bm_file = os.path.join(profile_dir, fname)
+        if not os.path.isfile(bm_file):
+            continue
+        try:
+            with open(bm_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        roots = data.get("roots") or {}
+        for root_key in ("bookmark_bar", "other", "synced", "mobile"):
+            root_node = roots.get(root_key)
+            if not root_node:
+                continue
             folder_name = root_node.get("name") or root_key
+            tmp: list = []
             for child in root_node.get("children") or []:
-                _parse_chromium_node(child, folder_name, results)
+                _parse_chromium_node(child, folder_name, tmp)
+            for title, url, folder in tmp:
+                if url in seen:
+                    continue
+                seen.add(url)
+                results.append((title, url, folder))
     return results
 
 

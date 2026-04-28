@@ -29,6 +29,7 @@ import openai
 
 from ui_automation import cancel as _cancel
 from ui_automation import sources as _sources
+from ui_automation import touched_files as _touched
 from ui_automation import llm_config as _llm
 
 # ── Контекст-компакция ────────────────────────────────────────────────────────
@@ -335,10 +336,6 @@ class ToolAgent:
                             word_find_replace, word_get_tables
                 PowerPoint: ppt_create, ppt_add_slide, ppt_add_textbox, ppt_read_slides
                 Outlook:    outlook_send_mail, outlook_list_inbox
-                Пути:       office_user_folder('desktop'|'documents') — правильный путь
-                            с учётом OneDrive-редиректа. В путях файлов можно писать
-                            'Desktop/foo.docx' или '~/Documents/foo.xlsx' — Office-тулы
-                            сами развернут корректно.
                 Универсально: office_run_python(code, data) — выполняет python-код
                               с доступом к Officer.Excel/.Word/.PowerPoint/.Outlook (COM-объекты).
                 ВАЖНО: Office-тулы работают НАПРЯМУЮ через COM — не нужно open_app,
@@ -382,7 +379,7 @@ class ToolAgent:
 office_run_python: ВНУТРИ кода используй Officer.Word/.Excel/... и resolve_path(p).
 НЕ пиши win32com.client.Dispatch — это создаёт дубль Word/Excel-процесса.
 Не пиши os.path.join(expanduser('~'), 'Desktop') — на Windows с OneDrive там
-пусто; используй resolve_path('Desktop/имя.docx') или office_user_folder('desktop').
+пусто; используй resolve_path('Desktop/имя.docx').
 
 Если сомневаешься в имени метода COM или константе (FileFormat,
 wdCollapse, olItemType, msoShape*) — СНАЧАЛА office_docs_search(query="...")
@@ -430,6 +427,16 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
 • НЕ используй ui_* для содержимого браузера — это работа browser-агента.
 • Формат клавиш: "Ctrl+N", "Alt+F4", "Ctrl+Shift+S", "Enter" — НЕ {CTRL}n.
 • Всегда завершай через task_done(summary="...").
+• ВАЖНО: что класть в task_done.summary.
+  - Если запрос — действие (открой/нажми/закрой/запиши/отправь): краткий
+    отчёт о факте выполнения («Открыт Excel», «Письмо отправлено»).
+  - Если запрос — чтение/перечисление/получение данных
+    (какие приложения, что в файле, какие листы, прочитай ячейку,
+    покажи список, сколько/какой/где): summary ДОЛЖЕН СОДЕРЖАТЬ САМИ
+    ДАННЫЕ из вывода тула — список, значения, текст. НЕ пиши «список
+    получен» / «данные прочитаны» — сам список/данные пользователь и
+    хочет увидеть. Если данных много, включи их полностью; обрезать
+    будет следующий слой.
 """
 
     def __init__(self, name: str, host: Optional[Any] = None,
@@ -495,6 +502,12 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
         else:
             # Любое не-read-only действие делает прошлые снимки неактуальными.
             _perceive_cache_invalidate()
+
+        # Регистрируем затронутый файл/папку — это попадёт в FilesBlock ответа.
+        try:
+            _touched.record_from_tool(name, args, text)
+        except Exception:
+            pass
         return text
 
     # ── main execution loop ───────────────────────────────────────────────────

@@ -227,14 +227,6 @@ def office_close_dialogs(app_name: str = "") -> str:
         return f"Ошибка office_close_dialogs: {e}"
 
 
-@mcp.tool
-def office_user_folder(kind: str = "desktop") -> str:
-    """Возвращает реальный путь к пользовательской папке (учитывает OneDrive-редирект).
-
-    kind: 'desktop' | 'documents'
-    """
-    return _known_folder(kind)
-
 
 def _open_excel(file_path: str) -> Tuple[object, object, bool]:
     """

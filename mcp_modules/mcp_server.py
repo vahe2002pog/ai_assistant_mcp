@@ -3,7 +3,7 @@ MCP сервер — точка входа.
 Регистрирует все субагент-инструменты и запускает FastMCP сервер.
 
 Субагенты и их инструменты:
-  WebAgent       → tools_web.py        (Tavily поиск, extract, open_url)
+  WebAgent       → tools_web.py        (Поиск в интернете, extract, open_url)
   FileAgent      → tools_files.py      (чтение, запись, копирование файлов)
   AppAgent       → tools_apps.py       (запуск приложений)
   WeatherAgent   → tools_weather.py    (погода)

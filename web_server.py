@@ -73,7 +73,6 @@ _TOOL_STATUS = {
     "com_run_python": "Работаю с Office…",
     "office_run_python": "Работаю с Office…",
     "office_close_dialogs": "Закрываю диалоги Office…",
-    "office_user_folder": "Смотрю папку пользователя…",
     "office_available_apps": "Смотрю доступные Office-приложения…",
     "office_running_apps": "Смотрю запущенные Office-приложения…",
     "office_is_available": "Проверяю Office-приложение…",
@@ -895,6 +894,23 @@ class Handler(BaseHTTPRequestHandler):
             md_path = _vm.save_document(target, text or "", tags=tags or ["document"])
             self._send_json(200, {"ok": True, "path": target, "note": md_path,
                                   "preview": (text or "")[:400]})
+            return
+
+        if path == "/api/open-file":
+            req = self._read_json() or {}
+            target = (req.get("path") or "").strip()
+            reveal = bool(req.get("reveal"))
+            if not target or not os.path.exists(target):
+                self._send_json(400, {"error": "path not found"}); return
+            try:
+                if reveal and not os.path.isdir(target):
+                    subprocess.Popen(["explorer", "/select,",
+                                      os.path.normpath(target)])
+                else:
+                    os.startfile(target)
+                self._send_json(200, {"ok": True})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
             return
 
         if path == "/api/upload":
