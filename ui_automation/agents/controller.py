@@ -13,6 +13,7 @@ Controller — детерминированный исполнитель Plan'а
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional
 
 from ui_automation import utils
@@ -23,6 +24,7 @@ from ui_automation.agents.contracts import (
 )
 
 Worker = Callable[[StepSpec, str], StepResult]
+_PARALLEL_SAFE_AGENTS = {AgentType.WEB, AgentType.CHAT}
 
 
 class _VerifierProto:
@@ -66,7 +68,7 @@ class Controller:
         Останов: planner вернул DoneMarker, бюджет исчерпан, отмена,
         SECURITY-ошибка, или N последовательных провалов подряд.
         """
-        from ui_automation.agents.planner import DoneMarker  # локально, избегаем циклов
+        from ui_automation.agents.planner import DoneMarker, ParallelSteps  # локально, избегаем циклов
 
         plan = Plan(user_request=goal, steps=[], budget_steps=budget_steps,
                     notes=f"context_hint_len={len(context_hint or '')}")
@@ -100,6 +102,7 @@ class Controller:
                 results=trace.step_results,
                 perception=perception,
                 chat_history=chat_history,
+                context_hint=context_hint,
             )
             if isinstance(next_item, DoneMarker):
                 trace.final_status = StepStatus.SUCCESS
@@ -108,6 +111,78 @@ class Controller:
                     f"[Planner] DONE: {next_item.summary}", "green"
                 )
                 break
+
+            if isinstance(next_item, ParallelSteps):
+                steps = next_item.steps
+                if not self._parallel_safe(steps):
+                    trace.final_status = StepStatus.FAILURE
+                    trace.final_summary = (
+                        "Планировщик попытался запустить небезопасный parallel batch. "
+                        "Параллельно разрешены только независимые web/chat-шаги."
+                    )
+                    break
+
+                if len(plan.steps) + len(steps) > budget_steps:
+                    trace.final_status = StepStatus.FAILURE
+                    trace.final_summary = (
+                        f"Планировщик вернул parallel batch на {len(steps)} шагов, "
+                        f"но бюджет ({budget_steps}) будет превышен."
+                    )
+                    break
+
+                for step in steps:
+                    plan.steps.append(step)
+
+                prev_ctx = self._build_prev_ctx(prev_summaries)
+                if context_hint:
+                    prev_ctx = (prev_ctx + "\n\n" + context_hint).strip()
+
+                utils.print_with_color(
+                    f"[Controller] parallel batch: {len(steps)} steps"
+                    + (f" | {next_item.reason}" if next_item.reason else ""),
+                    "magenta",
+                )
+                batch_results = self._run_parallel_steps(
+                    steps, prev_ctx, iteration + 1, budget_steps
+                )
+
+                for result in batch_results:
+                    trace.add_result(result)
+                    self._on_step_done(result, trace)
+                    if result.summary:
+                        prev_summaries.append(result.summary)
+
+                last_step = steps[-1] if steps else last_step
+                last_result = batch_results[-1] if batch_results else last_result
+
+                if all(r.status == StepStatus.SUCCESS for r in batch_results):
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+
+                security_error = next(
+                    (
+                        r.error for r in batch_results
+                        if r.status == StepStatus.FAILURE
+                        and r.error
+                        and r.error.error_class == ErrorClass.SECURITY
+                    ),
+                    None,
+                )
+                if security_error:
+                    trace.final_status = StepStatus.FAILURE
+                    trace.final_summary = (
+                        f"Остановка по security-гарду: {security_error.message}"
+                    )
+                    break
+
+                if consecutive_failures >= 3:
+                    trace.final_status = StepStatus.FAILURE
+                    trace.final_summary = (
+                        "Остановка: 3 провала подряд, Planner не смог скорректировать курс."
+                    )
+                    break
+                continue
 
             step: StepSpec = next_item
             plan.steps.append(step)
@@ -254,6 +329,53 @@ class Controller:
             finished_at=time.time(),
             retries_used=step.max_retries,
         )
+
+    def _run_parallel_steps(
+        self, steps: List[StepSpec], prev_ctx: str, step_num: int, total: int
+    ) -> List[StepResult]:
+        """Run a validated batch of independent web/chat steps concurrently."""
+        if not steps:
+            return []
+
+        results: List[Optional[StepResult]] = [None] * len(steps)
+        with ThreadPoolExecutor(max_workers=len(steps)) as pool:
+            futures = {
+                pool.submit(self._run_step, step, prev_ctx, step_num, total): i
+                for i, step in enumerate(steps)
+            }
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    results[idx] = fut.result()
+                except Exception as e:
+                    step = steps[idx]
+                    results[idx] = StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILURE,
+                        error=ErrorInfo(
+                            error_class=ErrorClass.UNKNOWN,
+                            message=str(e),
+                        ),
+                        finished_at=time.time(),
+                    )
+
+        return [r for r in results if r is not None]
+
+    @staticmethod
+    def _parallel_safe(steps: List[StepSpec]) -> bool:
+        if len(steps) < 2 or len(steps) > 4:
+            return False
+        seen_tasks = set()
+        for step in steps:
+            if step.agent not in _PARALLEL_SAFE_AGENTS:
+                return False
+            task = str(step.parameters.get("task") or step.free_text or "").strip().lower()
+            if not task or task in seen_tasks:
+                return False
+            seen_tasks.add(task)
+            if step.requires_confirmation or step.requires_verification:
+                return False
+        return True
 
     @staticmethod
     def _dependencies_satisfied(step: StepSpec, trace: ExecutionTrace) -> bool:

@@ -29,7 +29,7 @@ import json
 import os
 import re
 import time
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 VAULT_DIR = os.path.join(BASE_DIR, "vault")
@@ -40,6 +40,11 @@ FOLDERS = ("Scenarios", "Knowledge", "Experience", "Attachments", "WebSearch")
 # Приоритет при общем поиске (сначала сценарии пользователя, потом опыт, знания, документы,
 # в конце — веб-поиск: свежий, но наименее доверенный источник).
 FOLDER_PRIORITY = {"Scenarios": 0, "Experience": 1, "Knowledge": 2, "Attachments": 3, "WebSearch": 4}
+_STOPWORDS = {
+    "что", "как", "для", "или", "это", "тут", "там", "мне", "надо", "нужно",
+    "сделай", "покажи", "найди", "открой", "the", "and", "for", "with",
+    "this", "that", "what", "how",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,6 +116,20 @@ def _split_csv(s: str) -> Iterable[str]:
         yield buf
 
 
+def _tokens(text: str) -> set[str]:
+    return {
+        t for t in re.findall(r"[a-zа-яё0-9_]{3,}", (text or "").lower(), re.IGNORECASE)
+        if t not in _STOPWORDS
+    }
+
+
+def _lexical_overlap(query: str, text: str) -> int:
+    q = _tokens(query)
+    if not q:
+        return 0
+    return len(q & _tokens(text))
+
+
 def _dump_frontmatter(fm: dict) -> str:
     if not fm:
         return ""
@@ -142,6 +161,24 @@ def _chunk(body: str, name: str) -> List[str]:
             p = rest.strip() or first_line.strip()
         out.append(prefix + p + suffix)
     return out or [f"[{name}] {body.strip()}"]
+
+
+def _compact_body(body: str, max_len: int = 2400) -> str:
+    text = re.sub(r"(?m)^#{1,6}\s*", "", body or "")
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text[:max_len].strip()
+
+
+def _low_value_experience_body(body: str) -> bool:
+    m = re.search(r"(?is)^##\s*(?:Результат|Result)\s*(.*)$", body or "", re.MULTILINE)
+    result = (m.group(1) if m else body or "").strip()
+    low = result.lower()
+    if len(_tokens(result)) < 3:
+        return True
+    return low in {
+        "готово", "выполнено", "сделано", "ответ отправлен",
+        "задача выполнена", "ok", "done",
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,7 +230,19 @@ def _note_to_docs(note: dict):
         "tags": ",".join(fm.get("tags", []) if isinstance(fm.get("tags"), list) else []),
         "triggers": " | ".join(fm.get("triggers", []) if isinstance(fm.get("triggers"), list) else []),
     }
+    for key in ("date", "quality", "status", "source", "query"):
+        if key in fm:
+            base_meta[key] = fm.get(key)
     docs = []
+    if note["folder"] == "Experience":
+        if _low_value_experience_body(note["body"]):
+            return []
+        docs.append(Document(
+            page_content=f"[{note['name']} / опыт] {_compact_body(note['body'])}",
+            metadata=base_meta,
+        ))
+        return docs
+
     # Триггеры индексируются отдельным «толстым» чанком — чтобы фразы запуска хорошо матчились.
     if base_meta["triggers"]:
         docs.append(Document(page_content=f"[{note['name']} — триггеры] {base_meta['triggers']}", metadata=base_meta))
@@ -309,33 +358,84 @@ def _load_db():
 
 def search(query: str, k: int = 5, folder: Optional[str] = None) -> list:
     """Семантический поиск. Если folder указан — фильтр по папке."""
+    return [doc for doc, _score in search_with_scores(query, k=k, folder=folder)]
+
+
+def search_with_scores(query: str, k: int = 5, folder: Optional[str] = None) -> list[tuple[Any, Optional[float]]]:
+    """Семантический поиск с distance score, если vectorstore его поддерживает."""
     db = _load_db()
     if db is None or not query.strip():
         return []
     try:
+        kwargs = {"k": k}
         if folder:
-            return db.similarity_search(
-                query, k=k,
-                filter={"folder": folder},
-            )
-        return db.similarity_search(query, k=k)
+            kwargs["filter"] = {"folder": folder}
+        if hasattr(db, "similarity_search_with_score"):
+            pairs = db.similarity_search_with_score(query, **kwargs)
+            out = []
+            for doc, score in pairs:
+                try:
+                    doc.metadata["_score"] = float(score)
+                    out.append((doc, float(score)))
+                except Exception:
+                    out.append((doc, None))
+            return out
+        if folder:
+            docs = db.similarity_search(query, k=k, filter={"folder": folder})
+        else:
+            docs = db.similarity_search(query, k=k)
+        return [(doc, None) for doc in docs]
     except Exception:
         return []
 
 
 def search_grouped(query: str, k_per_folder: int = 2) -> dict:
     """Возвращает {folder: [Document,...]} с приоритетами FOLDER_PRIORITY."""
-    db = _load_db()
-    if db is None or not query.strip():
+    if not query.strip():
         return {}
     out: dict[str, list] = {}
     for folder in sorted(FOLDER_PRIORITY, key=lambda f: FOLDER_PRIORITY[f]):
-        try:
-            docs = db.similarity_search(query, k=k_per_folder, filter={"folder": folder})
-        except Exception:
-            docs = []
+        pairs = search_with_scores(query, k=max(k_per_folder * 4, k_per_folder), folder=folder)
+        docs = _filter_scored_docs(query, pairs, limit=k_per_folder)
         if docs:
             out[folder] = docs
+    return out
+
+
+def _filter_scored_docs(
+    query: str,
+    pairs: list[tuple[Any, Optional[float]]],
+    limit: int,
+) -> list:
+    """Отсекает дубли и слабые совпадения, чтобы RAG не забивал prompt шумом."""
+    if not pairs:
+        return []
+    scored = [(doc, score) for doc, score in pairs if (doc.page_content or "").strip()]
+    numeric_scores = [score for _doc, score in scored if score is not None]
+    best_score = min(numeric_scores) if numeric_scores else None
+    out = []
+    seen = set()
+    for doc, score in scored:
+        text = doc.page_content.strip()
+        rel = doc.metadata.get("rel_path", "")
+        key = (rel, text[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+
+        overlap = _lexical_overlap(query, text + " " + rel)
+        if best_score is not None and score is not None:
+            # FAISS returns distance: lower is better. Keep semantically close
+            # hits, but require lexical overlap for much weaker neighbors.
+            close_enough = score <= max(best_score * 1.35, best_score + 0.18)
+            if not close_enough and overlap == 0:
+                continue
+        elif overlap == 0 and len(_tokens(query)) >= 2:
+            continue
+
+        out.append(doc)
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -414,6 +514,8 @@ def save_experience(
         "date": date,
         "agents": flat_agents,
         "apps": list(app_names or []),
+        "quality": "auto",
+        "status": "success",
     }
     fname = f"{date}-{_slug(task)}.md"
     path = os.path.join(VAULT_DIR, "Experience", fname)
@@ -587,8 +689,10 @@ def delete_note(rel_path: str) -> bool:
 #  Форматирование для контекста LLM
 # ─────────────────────────────────────────────────────────────────────────────
 
-def format_context(query: str, k_per_folder: int = 2, max_chars: int = 2500) -> str:
+def format_context(query: str, k_per_folder: int = 2, max_chars: int = 2200) -> str:
     """Собирает блок `[Релевантный опыт]` для вставки в подсказку агента."""
+    if len(_tokens(query)) < 2:
+        return ""
     grouped = search_grouped(query, k_per_folder=k_per_folder)
     if not grouped:
         return ""
@@ -597,16 +701,23 @@ def format_context(query: str, k_per_folder: int = 2, max_chars: int = 2500) -> 
         "Experience": "Опыт",
         "Knowledge": "Знание",
         "Attachments": "Документ",
+        "WebSearch": "Веб-поиск",
     }
     lines: List[str] = []
     total = 0
+    seen_rel: set[str] = set()
     for folder in sorted(grouped, key=lambda f: FOLDER_PRIORITY.get(f, 99)):
         for doc in grouped[folder]:
             text = doc.page_content.strip()
             if not text:
                 continue
             rel = doc.metadata.get("rel_path", "")
-            line = f"[{labels.get(folder, folder)} · {rel}] {text}"
+            if rel in seen_rel and folder in ("Experience", "WebSearch", "Scenarios"):
+                continue
+            seen_rel.add(rel)
+            score = doc.metadata.get("_score")
+            score_part = f" score={score:.3f}" if isinstance(score, float) else ""
+            line = f"[{labels.get(folder, folder)} · {rel}{score_part}] {text}"
             if total + len(line) > max_chars:
                 return "\n".join(lines)
             lines.append(line)

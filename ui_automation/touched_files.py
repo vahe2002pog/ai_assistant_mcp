@@ -154,10 +154,10 @@ def record_from_tool(name: str, args: Dict, result: str) -> None:
 
     try:
         # ── обзорные тулы — все увиденные пути идут в candidates ────────────
-        if name in ("list_directory", "view_cache"):
-            # Формат строк: "<id>: <path>"
+        if name in ("list_directory", "search_files", "view_cache"):
+            # Формат строк: "<id>: <path>" или "<id>: [Файл/Папка] <path>"
             for line in (result or "").splitlines():
-                m = re.match(r"\s*\d+:\s*(.+?)\s*$", line)
+                m = re.match(r"\s*\d+:\s*(?:\[[^\]]+\]\s*)?(.+?)\s*$", line)
                 if m:
                     p = m.group(1).strip()
                     # list_directory нормализует слеши на '/' — вернём обратно.

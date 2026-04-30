@@ -7,6 +7,7 @@ import os
 import sys
 import shutil
 import datetime
+from fnmatch import fnmatch
 from typing import Union
 from send2trash import send2trash
 try:
@@ -159,6 +160,168 @@ def list_directory(directory: Union[str, int]) -> str:
         return f"Список файлов в {path}:\n" + "\n".join(result)
     except Exception as e:
         return f"Ошибка при чтении: {e}"
+
+
+@mcp.tool
+def search_files(
+    directory: Union[str, int],
+    name_query: str = "",
+    file_type: str = "any",
+    recursive: bool = True,
+    limit: int = 50,
+) -> str:
+    """
+    Ищет файлы и папки в указанной директории с поддержкой рекурсивного обхода,
+    поиска по имени и фильтрации по типу.
+
+    Args:
+        directory (str | int): Системная папка, ID папки из кэша или полный путь.
+        name_query (str): Часть имени, полное имя или glob-маска (например '*.txt').
+        file_type (str): Тип искомого элемента: 'any', 'file', 'folder', расширение
+            вроде '.py' / 'py', или mime-подобные группы: 'image', 'video', 'audio',
+            'document', 'archive', 'code'.
+        recursive (bool): Если True, ищет рекурсивно по всем вложенным папкам.
+        limit (int): Максимум результатов в ответе.
+
+    Returns:
+        str: Форматированный список найденных элементов с ID из кэша.
+    """
+    if isinstance(directory, int):
+        path = cache_get(directory)
+        if not path:
+            return f"ID {directory} не найдено в кэше."
+    else:
+        path = get_system_path(directory)
+
+    if not path or not os.path.exists(path):
+        return f"Папка {directory} не найдена или доступ закрыт."
+
+    if not os.path.isdir(path):
+        return f"Путь '{path}' не является папкой."
+
+    limit = max(1, min(limit, 200))
+    normalized_query = name_query.strip().lower().replace("\\", "/")
+    normalized_type = file_type.strip().lower() or "any"
+    search_root = os.path.abspath(path)
+    skip_dir_names = {
+        ".git", ".hg", ".svn", "__pycache__", ".pytest_cache", ".mypy_cache",
+        ".ruff_cache", ".tox", ".venv", "venv", "env", "node_modules",
+        "dist", "build", ".next", ".nuxt", ".cache",
+    }
+
+    type_groups = {
+        "image": {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico", ".tiff"},
+        "video": {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".webm", ".m4v"},
+        "audio": {".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a"},
+        "document": {".txt", ".md", ".pdf", ".doc", ".docx", ".rtf", ".odt", ".csv", ".xls", ".xlsx", ".ppt", ".pptx"},
+        "archive": {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"},
+        "code": {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".php", ".rb", ".swift", ".kt", ".kts", ".json", ".yaml", ".yml", ".xml", ".html", ".css", ".scss", ".sql", ".sh", ".ps1", ".bat"},
+    }
+
+    def relative_path(full_path: str) -> str:
+        try:
+            rel = os.path.relpath(full_path, search_root)
+        except ValueError:
+            rel = os.path.basename(full_path)
+        return rel.replace("\\", "/")
+
+    def matches_name(entry_name: str, rel_path: str) -> bool:
+        if not normalized_query:
+            return True
+        lowered = entry_name.lower()
+        lowered_rel = rel_path.lower()
+        if any(ch in normalized_query for ch in "*?[]"):
+            if "/" in normalized_query:
+                return fnmatch(lowered_rel, normalized_query)
+            return fnmatch(lowered, normalized_query)
+        return normalized_query in lowered or normalized_query in lowered_rel
+
+    def matches_type(full_path: str) -> bool:
+        is_dir = os.path.isdir(full_path)
+        if normalized_type == "any":
+            return True
+        if normalized_type == "folder":
+            return is_dir
+        if normalized_type == "file":
+            return not is_dir
+        if is_dir:
+            return False
+
+        ext = os.path.splitext(full_path)[1].lower()
+        if normalized_type in type_groups:
+            return ext in type_groups[normalized_type]
+
+        expected_ext = normalized_type if normalized_type.startswith(".") else f".{normalized_type}"
+        return ext == expected_ext
+
+    matches = []
+
+    try:
+        if recursive:
+            walker = os.walk(path)
+            for root, dirs, files in walker:
+                visible_dirs = sorted(dirs)
+                dirs[:] = sorted(
+                    d for d in dirs
+                    if d.lower() not in skip_dir_names
+                )
+                files = sorted(files)
+                for entry_name in visible_dirs + files:
+                    full_path = os.path.join(root, entry_name)
+                    rel_path = relative_path(full_path)
+                    if matches_name(entry_name, rel_path) and matches_type(full_path):
+                        matches.append(full_path)
+        else:
+            for entry_name in sorted(os.listdir(path)):
+                full_path = os.path.join(path, entry_name)
+                rel_path = relative_path(full_path)
+                if matches_name(entry_name, rel_path) and matches_type(full_path):
+                    matches.append(full_path)
+    except Exception as e:
+        return f"Ошибка при поиске: {e}"
+
+    def rank_match(full_path: str) -> tuple:
+        rel = relative_path(full_path).lower()
+        base = os.path.basename(full_path).lower()
+        query = normalized_query
+        if not query:
+            match_rank = 3
+        elif any(ch in query for ch in "*?[]"):
+            pattern = query if "/" in query else os.path.basename(query)
+            match_rank = 0 if fnmatch(base, pattern) or fnmatch(rel, query) else 3
+        elif base == query:
+            match_rank = 0
+        elif base.startswith(query):
+            match_rank = 1
+        elif query in base:
+            match_rank = 2
+        else:
+            match_rank = 3
+
+        depth = rel.count("/")
+        is_file = 1 if os.path.isfile(full_path) else 0
+        return (match_rank, depth, is_file, rel)
+
+    matches = sorted(matches, key=rank_match)[:limit]
+
+    if not matches:
+        return (
+            f"Ничего не найдено в {path}. "
+            f"Параметры: name_query='{name_query}', file_type='{file_type}', recursive={recursive}."
+        )
+
+    result = []
+    for full_path in matches:
+        idx = cache_put(full_path)
+        item_type = "Папка" if os.path.isdir(full_path) else "Файл"
+        normalized_path = full_path.replace('\\', '/')
+        result.append(f"{idx}: [{item_type}] {normalized_path}")
+
+    return (
+        f"Найдено {len(matches)} элемент(ов) в {path} "
+        f"(name_query='{name_query}', file_type='{file_type}', recursive={recursive}):\n"
+        + "\n".join(result)
+    )
 
 
 @mcp.tool

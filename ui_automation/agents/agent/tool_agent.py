@@ -323,7 +323,9 @@ class ToolAgent:
   Клики:        ui_click_element(text, title_re), ui_click(x, y)
   Клавиши:      ui_send_keys(keys, title_re)
   Осмотр:       ui_list_interactive, ui_get_text, ui_screenshot
-  Файлы:        read_file, write_file, list_directory, delete_file, copy_file, move_file
+  Файлы:        execute_open_file, open_folder, list_directory, search_files, view_cache,
+                create_item, rename_item, copy_item, move_file, read_file, edit_file,
+                get_file_info, delete_item, undo_last_action, open_recycle_bin
   Медиа:        control_volume, control_media
   Office (COM): office_launch/office_quit/office_visible/office_available_apps/office_running_apps,
                 office_close_dialogs (снимает модалки, блокирующие COM),

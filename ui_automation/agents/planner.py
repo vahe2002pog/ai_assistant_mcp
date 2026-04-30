@@ -2,7 +2,7 @@
 Planner — инкрементальный планировщик (ReAct).
 
 Ответственность:
-  • По (goal, history, perception) выдать СЛЕДУЮЩИЙ один шаг (StepSpec)
+  • По (goal, history, perception, context_hint) выдать СЛЕДУЮЩИЙ один шаг (StepSpec)
     или DoneMarker, если цель достигнута.
   • НЕ исполнять и НЕ оценивать результат — это делает Controller.
   • Не знать про конкретные tools — только про AgentType.
@@ -22,6 +22,7 @@ from ui_automation.agents.contracts import (
 )
 
 _VALID_AGENTS = {t.value for t in AgentType}
+_PARALLEL_SAFE_AGENTS = {AgentType.WEB.value, AgentType.CHAT.value}
 
 
 _NEXT_STEP_PROMPT = """/no_think
@@ -31,6 +32,10 @@ _NEXT_STEP_PROMPT = """/no_think
 Верни СТРОГО один JSON:
   {"done": true, "summary": "краткий итог для пользователя"}
   {"task": "цель шага", "agent": "system|browser|web|vision|chat", "expected": "проверяемый признак"}
+  {"parallel": [
+    {"task": "независимая цель 1", "agent": "web", "expected": "проверяемый признак 1"},
+    {"task": "независимая цель 2", "agent": "chat", "expected": "проверяемый признак 2"}
+  ], "reason": "почему шаги независимы"}
 
 АГЕНТЫ (выбери одного, остальное — забота агента):
 
@@ -44,7 +49,7 @@ _NEXT_STEP_PROMPT = """/no_think
                ui_click, ui_click_element, ui_click_by_index, ui_send_keys, ui_type_text,
                ui_get_text, ui_screenshot, ui_list_interactive, ui_find_inputs,
                ui_find_elements, ui_list_processes, ui_clipboard_get, ui_clipboard_set
-      files:   execute_open_file, open_folder, list_directory, view_cache, create_item,
+      files:   execute_open_file, open_folder, list_directory, search_files, view_cache, create_item,
                rename_item, copy_item, move_file, read_file, edit_file, get_file_info,
                delete_item, undo_last_action, open_recycle_bin
       media:   control_volume, control_media
@@ -80,6 +85,14 @@ _NEXT_STEP_PROMPT = """/no_think
 
 ПРАВИЛА:
 - Один шаг = одна цель для одного агента. Не склеивай разных агентов.
+- parallel используй ТОЛЬКО для независимых web/chat-шагов, которые не читают/не меняют
+  одно и то же окно, браузер, файл или состояние ОС. Не параллель system/browser/vision.
+  При сомнении верни один обычный шаг.
+- Учитывай контекст из памяти/RAG и сценарии. Если в `[Релевантный опыт]`,
+  `[Знание]` или `[Сценарий пользователя]` уже есть достаточная инструкция,
+  планируй шаг с опорой на неё, не игнорируй этот блок.
+- Для текущих фактов, цен, погоды и новостей всё равно выбирай web, даже если
+  похожий старый опыт найден в памяти.
 - task — цель в одной фразе, НЕ пошаговая инструкция: агент сам выберет tools.
 - Если последний шаг — failure, следующий обязан исправлять причину (см. reason).
 - Не повторяй только что выполненный шаг буквально.
@@ -92,6 +105,9 @@ _NEXT_STEP_PROMPT = """/no_think
 
 История диалога (предыдущие сообщения в этом чате):
 {chat_history}
+
+Контекст из памяти, сценариев и окружения:
+{context_hint}
 
 Цель пользователя (текущее сообщение):
 {goal}
@@ -116,6 +132,18 @@ class DoneMarker:
         return f"DoneMarker({self.summary[:60]!r})"
 
 
+class ParallelSteps:
+    """Batch of independent steps that Controller may execute concurrently."""
+    __slots__ = ("steps", "reason")
+
+    def __init__(self, steps: List[StepSpec], reason: str = "") -> None:
+        self.steps = steps
+        self.reason = reason
+
+    def __repr__(self) -> str:
+        return f"ParallelSteps({len(self.steps)} steps, reason={self.reason[:60]!r})"
+
+
 class Planner:
     """LLM-планировщик. Stateless."""
 
@@ -129,7 +157,8 @@ class Planner:
         results: List[StepResult],
         perception: str,
         chat_history: str = "",
-    ) -> "StepSpec | DoneMarker":
+        context_hint: str = "",
+    ) -> "StepSpec | ParallelSteps | DoneMarker":
         """Выдаёт СЛЕДУЮЩИЙ шаг на основе цели, истории и актуального восприятия.
 
         chat_history — текст предыдущих сообщений в чате (user/assistant), чтобы
@@ -143,6 +172,7 @@ class Planner:
             .replace("{history}", history_block or "(пусто)")
             .replace("{perception}", perception or "(нет данных)")
             .replace("{chat_history}", chat_history.strip() or "(пусто)")
+            .replace("{context_hint}", context_hint.strip() or "(пусто)")
         )
 
         try:
@@ -169,12 +199,37 @@ class Planner:
         if obj.get("done") is True:
             return DoneMarker(str(obj.get("summary", "")).strip() or "Готово.")
 
+        if isinstance(obj.get("parallel"), list):
+            steps = []
+            for item in obj.get("parallel", [])[:4]:
+                if not isinstance(item, dict):
+                    continue
+                step = self._step_from_obj(item)
+                if step and step.agent.value in _PARALLEL_SAFE_AGENTS:
+                    step.requires_verification = False
+                    steps.append(step)
+            if len(steps) >= 2:
+                return ParallelSteps(
+                    steps=steps,
+                    reason=str(obj.get("reason", "")).strip(),
+                )
+            if len(steps) == 1:
+                return steps[0]
+            return DoneMarker(f"Планировщик вернул небезопасный parallel-шаг: {obj!r}")
+
+        step = self._step_from_obj(obj)
+        if step is None:
+            return DoneMarker(f"Планировщик вернул некорректный шаг: {obj!r}")
+        return step
+
+    @staticmethod
+    def _step_from_obj(obj: dict) -> Optional[StepSpec]:
         task_text = str(obj.get("task", "")).strip()
         agent_str = str(obj.get("agent", "")).strip().lower()
         expected = str(obj.get("expected", "")).strip() or task_text
 
         if not task_text or agent_str not in _VALID_AGENTS:
-            return DoneMarker(f"Планировщик вернул некорректный шаг: {obj!r}")
+            return None
 
         needs_verify = agent_str in ("system", "browser")
         return StepSpec(
@@ -231,4 +286,4 @@ class Planner:
         return ""
 
 
-__all__ = ["Planner", "DoneMarker"]
+__all__ = ["Planner", "DoneMarker", "ParallelSteps"]

@@ -13,13 +13,9 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import inspect
-import json
 import os
-import subprocess
 import sys
-import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, get_type_hints
 
 # ── Загрузка .env ДО всех импортов ───────────────────────────────────────────
@@ -39,130 +35,6 @@ if _ROOT not in sys.path:
 
 os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,::1")
 os.environ.setdefault("no_proxy", "localhost,127.0.0.1,::1")
-
-# ── Настройки модели ──────────────────────────────────────────────────────────
-_API_BASE  = os.environ.get("API_BASE",  "http://localhost:8000/v1")
-_API_KEY   = os.environ.get("API_KEY",   "llama")
-_API_MODEL = os.environ.get("API_MODEL", "Qwen3.5-9B-abliterated-vision-Q4_K_M")
-
-# Отключает режим размышлений (thinking) у Qwen3 при использовании llama-server с --jinja
-_NO_THINK  = {"chat_template_kwargs": {"enable_thinking": False}}
-
-# ── Системный промпт ──────────────────────────────────────────────────────────
-_SYSTEM_PROMPT = """Ты — Компас, умный персональный ассистент для Windows.
-
-Твои возможности:
-- Поиск информации в интернете (web_search, web_extract)
-- Управление файлами и папками (read_file, write_file, list_directory, delete_file)
-- Запуск приложений (open_app)
-- Закладки браузеров (search_bookmarks, open_bookmark, list_bookmarks_browsers)
-- Управление браузером (browser_navigate, browser_click, browser_get_state)
-- Погода (get_weather)
-- Управление звуком и медиа (control_volume, control_media)
-- Управление окнами и UI (ui_list_windows, ui_click, ui_send_keys и др.)
-
-КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:
-0. ДЕЛАЙ ТОЛЬКО ТО, О ЧЁМ ПРОСИТ ПОЛЬЗОВАТЕЛЬ. Не добавляй лишних шагов.
-   Пример: «открой Word» → open_app("Word") → task_done. НЕ создавай документ, НЕ вводи текст, НЕ сохраняй файл, если об этом не просили.
-1. После выполнения задачи ВСЕГДА вызывай инструмент task_done(summary="...") — это единственный способ завершить ответ
-2. Пока task_done не вызван — выполняй следующий шаг задачи
-3. Если инструмент вернул ошибку — попробуй альтернативный подход, не сдавайся
-4. После open_app: используй ui_wait_for_window, если таймаут — вызови ui_list_windows для поиска реального заголовка
-5. Чтобы нажать кнопку или пункт меню — используй ui_click_element(text="Текст кнопки", title_re="Окно"), он сам найдёт координаты по тексту
-6. Для ввода текста и горячих клавиш: ui_focus_window → ui_send_keys. Синтаксис: "Ctrl+N", "Ctrl+S", "Alt+F4", "Enter", "Escape", "Delete"
-7. Заголовки Office: "Документ1 - Word", "Книга1 - Excel", "Презентация1 - PowerPoint"
-8. Если задача принципиально невозможна — вызови task_done с объяснением
-9. ВСЕГДА используй web_search для любого поиска информации в интернете — не отвечай по памяти на вопросы о текущих событиях, ценах, погоде (если нет get_weather), курсах валют и любых фактах требующих актуальных данных
-10. РАБОТА С БРАУЗЕРОМ: для любых действий в браузере (перейти на сайт, кликнуть на элемент страницы, ввести текст на сайте, прокрутить страницу, управлять вкладками) ОБЯЗАТЕЛЬНО используй browser_* инструменты (browser_navigate, browser_get_state, browser_click, browser_input_text и др.). ЗАПРЕЩЕНО использовать ui_* инструменты для взаимодействия с содержимым браузера — ui_* только для нативных Windows-приложений (Word, Excel, проводник и т.п.).
-"""
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Обработка специальных команд от инструментов
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _resolve_special(result: str) -> str:
-    """Выполняет side-эффекты из магических строк, возвращаемых инструментами."""
-    if not isinstance(result, str):
-        return str(result)
-
-    if result.startswith("__OPEN_URL_COMMAND__:"):
-        url = result[len("__OPEN_URL_COMMAND__:"):]
-        try:
-            os.startfile(url)
-        except Exception:
-            subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
-        return f"Открыт URL: {url}"
-
-    if result.startswith("__OPEN_APP_COMMAND__:"):
-        path = result[len("__OPEN_APP_COMMAND__:"):]
-        try:
-            subprocess.Popen([path], shell=False)
-        except Exception:
-            subprocess.Popen(path, shell=True)
-        return f"Запущено: {path}"
-
-    if result.startswith("__OPEN_FILE_COMMAND__:"):
-        path = result[len("__OPEN_FILE_COMMAND__:"):]
-        try:
-            os.startfile(path)
-        except Exception:
-            subprocess.Popen(["cmd", "/c", "start", "", path], shell=False)
-        return f"Открыт файл: {path}"
-
-    if result.startswith("__VOLUME_COMMAND__:"):
-        return _exec_volume(result[len("__VOLUME_COMMAND__:"):])
-
-    if result.startswith("__MEDIA_COMMAND__:"):
-        return _exec_media(result[len("__MEDIA_COMMAND__:"):])
-
-    return result
-
-
-def _exec_volume(spec: str) -> str:
-    """__VOLUME_COMMAND__:action[:amount]"""
-    parts = spec.split(":")
-    action = parts[0]
-    amount = float(parts[1]) if len(parts) > 1 else 0.1
-    try:
-        from ctypes import cast, POINTER
-        from comtypes import CLSCTX_ALL
-        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-        devices = AudioUtilities.GetSpeakers()
-        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        vol = cast(interface, POINTER(IAudioEndpointVolume))
-        if action == "mute":
-            vol.SetMute(not vol.GetMute(), None)
-            return "Звук отключён" if vol.GetMute() else "Звук включён"
-        elif action == "set":
-            vol.SetMasterVolumeLevelScalar(max(0.0, min(1.0, amount)), None)
-            return f"Громкость установлена: {int(amount * 100)}%"
-        elif action == "up":
-            v = min(1.0, vol.GetMasterVolumeLevelScalar() + amount)
-            vol.SetMasterVolumeLevelScalar(v, None)
-            return f"Громкость увеличена до {int(v * 100)}%"
-        elif action == "down":
-            v = max(0.0, vol.GetMasterVolumeLevelScalar() - amount)
-            vol.SetMasterVolumeLevelScalar(v, None)
-            return f"Громкость уменьшена до {int(v * 100)}%"
-        return f"Неизвестное действие с громкостью: {action}"
-    except Exception as e:
-        return f"Ошибка управления звуком: {e}"
-
-
-def _exec_media(action: str) -> str:
-    """__MEDIA_COMMAND__:action"""
-    import ctypes
-    _VK = {"playpause": 0xB3, "next": 0xB0, "prev": 0xB1, "stop": 0xB2}
-    vk = _VK.get(action)
-    if vk is None:
-        return f"Неизвестное медиадействие: {action}"
-    try:
-        ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
-        ctypes.windll.user32.keybd_event(vk, 0, 0x0002, 0)
-        return f"Медиа: {action}"
-    except Exception as e:
-        return f"Ошибка медиаклавиши: {e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -246,26 +118,6 @@ def _build_tool_schema(name: str, fn: Callable) -> Dict:
     }
 
 
-_TASK_DONE_TOOL = "task_done"
-_TASK_DONE_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": _TASK_DONE_TOOL,
-        "description": "Вызови этот инструмент когда задача полностью выполнена или если она невозможна. Это ЕДИНСТВЕННЫЙ способ завершить выполнение.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "summary": {
-                    "type": "string",
-                    "description": "Краткое описание того, что было сделано, или причина невозможности выполнения.",
-                }
-            },
-            "required": ["summary"],
-        },
-    },
-}
-
-
 def _build_tools() -> Tuple[Dict[str, Callable], List[Dict]]:
     """
     Импортирует все mcp_modules и возвращает (registry, openai_schemas).
@@ -300,129 +152,7 @@ def _build_tools() -> Tuple[Dict[str, Callable], List[Dict]]:
             print(f"[Предупреждение] Не удалось загрузить {mod_name}: {e}")
 
     schemas = [_build_tool_schema(name, fn) for name, fn in registry.items()]
-    # Добавляем сентинел-инструмент завершения
-    schemas.append(_TASK_DONE_SCHEMA)
     return registry, schemas
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Исполнение вызова инструмента
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _call_tool(registry: Dict[str, Callable], name: str, args: Dict) -> str:
-    """Вызывает инструмент по имени и возвращает результат как строку."""
-    fn = registry.get(name)
-    if fn is None:
-        return f"Инструмент '{name}' не найден."
-    try:
-        if inspect.iscoroutinefunction(fn):
-            result = asyncio.run(fn(**args))
-        else:
-            result = fn(**args)
-        return _resolve_special(str(result) if result is not None else "")
-    except Exception as e:
-        return f"Ошибка при выполнении {name}: {e}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Один цикл обработки: ассистент → (инструменты → ассистент)*
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _process_turn(
-    client,
-    messages: List[Dict],
-    openai_tools: List[Dict],
-    registry: Dict[str, Callable],
-) -> None:
-    """
-    Выполняет один разговорный ход.
-    Цикл: запрос к LLM → выполнить tool_calls → снова запрос → ...
-    Останавливается только когда LLM вызывает task_done().
-    Если LLM отвечает текстом без инструментов — напоминаем вызвать task_done.
-    """
-    import openai as _openai
-
-    while True:
-        try:
-            from ui_automation.agents.agent.tool_agent import _chat_with_tools
-            response = _chat_with_tools(
-                model=_API_MODEL,
-                messages=messages,
-                tools=openai_tools,
-                temperature=0.7,
-                extra_body=_NO_THINK,
-                client=client,
-            )
-        except _openai.APIConnectionError:
-            print("\n[Ошибка] Не удаётся подключиться к модели. Убедись, что llama-server запущен на порту 8000.")
-            return
-        except Exception as e:
-            print(f"\n[Ошибка модели] {e}")
-            return
-
-        choice = response.choices[0]
-        msg = choice.message
-
-        # Формируем запись в историю
-        assistant_entry: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
-        rc = getattr(msg, "reasoning_content", None)
-        if rc:
-            assistant_entry["reasoning_content"] = rc
-        if msg.tool_calls:
-            assistant_entry["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                }
-                for tc in msg.tool_calls
-            ]
-        messages.append(assistant_entry)
-
-        if not msg.tool_calls:
-            # tool_choice="required" — не должно случаться, но если модель всё же
-            # вернула текст — показываем его и выходим
-            if msg.content:
-                print(f"\nАссистент: {msg.content}")
-            return
-
-        # Выполняем вызовы инструментов
-        done = False
-        for tc in msg.tool_calls:
-            fn_name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments)
-            except Exception:
-                args = {}
-
-            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-            print(f"\n[{fn_name}({args_str})]", flush=True)
-
-            # Сентинел завершения — единственный выход из цикла
-            if fn_name == _TASK_DONE_TOOL:
-                summary = args.get("summary", "")
-                print(f"\nАссистент: {summary}\n", flush=True)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": "ok",
-                })
-                done = True
-                continue
-
-            result = _call_tool(registry, fn_name, args)
-            print(f"→ {result}", flush=True)
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result,
-            })
-
-        if done:
-            return
-        # Продолжаем цикл — модель получит результаты инструментов и сделает следующий шаг
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Основной чат
@@ -625,13 +355,8 @@ def run_chat(request: str = "") -> None:
     _start_ws_bridge()
 
     print("Инициализация HostAgent…")
-    try:
-        host = _make_host_agent()
-        print("HostAgent готов.")
-    except Exception as e:
-        print(f"[Предупреждение] HostAgent не инициализирован ({e}), fallback на flat-режим.")
-        _run_chat_flat(request)
-        return
+    host = _make_host_agent()
+    print("HostAgent готов.")
 
     def _dispatch(user_input: str) -> None:
         windows_ctx = _get_windows_context()
@@ -677,61 +402,6 @@ def run_chat(request: str = "") -> None:
             print("До свидания!")
             break
         _dispatch(user_input)
-
-
-def _run_chat_flat(request: str = "") -> None:
-    """
-    Резервный flat-режим (один LLM + все инструменты).
-    Используется если HostAgent недоступен.
-    """
-    import openai
-
-    print("Загрузка инструментов (flat-режим)…")
-    registry, openai_tools = _build_tools()
-    print(f"Загружено инструментов: {len(registry)}")
-
-    client = openai.OpenAI(base_url=_API_BASE, api_key=_API_KEY)
-    messages: List[Dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
-
-    if request:
-        windows_ctx = _get_windows_context()
-        rag_ctx = _rag_retrieve(request)
-        user_msg = request
-        if windows_ctx:
-            user_msg += f"\n\n[Открытые окна]\n{windows_ctx}"
-        if rag_ctx:
-            user_msg += f"\n\n[Релевантный опыт]\n{rag_ctx}"
-        messages.append({"role": "user", "content": user_msg})
-        _process_turn(client, messages, openai_tools, registry)
-        return
-
-    print("\nАссистент готов (flat). Введи 'выход' для завершения.\n")
-    while True:
-        try:
-            user_input = input("Вы: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nДо свидания!")
-            break
-        if not user_input:
-            continue
-        if user_input.lower() in ("выход", "exit", "quit", "/выход"):
-            print("До свидания!")
-            break
-        windows_ctx = _get_windows_context()
-        rag_ctx = _rag_retrieve(user_input)
-        scenario = _match_scenario(user_input)
-        user_msg = user_input
-        if scenario:
-            user_msg += (
-                f"\n\n[Сценарий пользователя — \"{scenario['name']}\"]\n"
-                f"{scenario['body'].strip()}"
-            )
-        if windows_ctx:
-            user_msg += f"\n\n[Открытые окна]\n{windows_ctx}"
-        if rag_ctx:
-            user_msg += f"\n\n[Релевантный опыт]\n{rag_ctx}"
-        messages.append({"role": "user", "content": user_msg})
-        _process_turn(client, messages, openai_tools, registry)
 
 
 def _start_ws_bridge() -> None:

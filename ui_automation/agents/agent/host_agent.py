@@ -235,15 +235,18 @@ class HostAgent:
         final = trace.final_summary or ""
         utils.print_with_color(f"\n[HostAgent] Готово ({trace.final_status.value}):\n{final}", "green")
 
-        # Опыт в RAG — фоном, не блокируем ответ.
-        agent_types = [s.agent.value for s in trace.plan.steps]
-        _save_experience_async(task, final, agent_types)
-
         # Если задача состояла только из chat-агентов — отдаём ответ как есть,
         # без форматтера (он превратит дружелюбный текст в казённый «voice»).
         only_chat = bool(trace.plan.steps) and all(
             s.agent == AgentType.CHAT for s in trace.plan.steps
         )
+        agent_types = [s.agent.value for s in trace.plan.steps]
+        if _should_save_experience(task, final, trace, only_chat=only_chat):
+            _save_experience_async(
+                task,
+                _experience_result_from_trace(final, trace),
+                agent_types,
+            )
         if only_chat:
             from ui_automation.agents.agent.response_formatter import AssistantResponse
             # Берём реальный ответ chat-агента, а не summary планировщика
@@ -291,7 +294,7 @@ class HostAgent:
         def _subtask_text(step: StepSpec, prev: str) -> str:
             text = step.parameters.get("task") or step.free_text or step.expected_outcome
             if prev:
-                text = f"{text}{prev}"
+                text = f"{text}\n\n[Результаты предыдущих шагов]\n{prev}"
             if context_hint:
                 text = f"{text}\n\n{context_hint}"
             return text
@@ -429,3 +432,70 @@ def _save_experience_async(task: str, result: str, agent_types: list) -> None:
             utils.print_with_color(f"[RAG] Не удалось сохранить опыт: {e}", "yellow")
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+def _explicit_memory_request(task: str) -> bool:
+    low = (task or "").strip().lower()
+    return any(
+        marker in low
+        for marker in (
+            "запомни", "запомнить", "сохрани в память", "добавь в память",
+            "remember", "save this", "store this",
+        )
+    )
+
+
+def _looks_trivial_task(task: str) -> bool:
+    low = (task or "").strip().lower()
+    if len(low) < 12:
+        return True
+    trivial = {
+        "привет", "здравствуй", "спасибо", "ок", "окей", "да", "нет",
+        "выход", "exit", "quit", "что умеешь", "кто ты",
+    }
+    return low in trivial
+
+
+def _looks_trivial_result(result: str) -> bool:
+    low = (result or "").strip().lower()
+    if len(low) < 40:
+        return True
+    generic = (
+        "готово", "выполнено", "сделано", "ответ отправлен",
+        "задача выполнена", "ok", "done",
+    )
+    return low in generic
+
+
+def _should_save_experience(task: str, result: str, trace: ExecutionTrace,
+                            only_chat: bool = False) -> bool:
+    """Не засоряем RAG обычной болтовнёй и техническими пустыми итогами."""
+    if _explicit_memory_request(task):
+        return bool((result or "").strip())
+    if trace.final_status != StepStatus.SUCCESS:
+        return False
+    if only_chat:
+        return False
+    if _looks_trivial_task(task) or _looks_trivial_result(result):
+        return False
+    useful_agents = {AgentType.SYSTEM, AgentType.BROWSER, AgentType.WEB, AgentType.VISION}
+    if not any(s.agent in useful_agents for s in trace.plan.steps):
+        return False
+    return True
+
+
+def _experience_result_from_trace(final: str, trace: ExecutionTrace) -> str:
+    parts = [f"Итог: {(final or '').strip()}"]
+    step_lines = []
+    for step in trace.plan.steps:
+        result = next((r for r in trace.step_results if r.step_id == step.step_id), None)
+        if result is None or result.status != StepStatus.SUCCESS:
+            continue
+        task = step.parameters.get("task") or step.expected_outcome or step.action_type
+        summary = (result.summary or "").strip()
+        if not summary:
+            continue
+        step_lines.append(f"- [{step.agent.value}] {task}: {summary[:500]}")
+    if step_lines:
+        parts.append("Что сработало:\n" + "\n".join(step_lines[:8]))
+    return "\n\n".join(parts)
