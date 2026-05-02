@@ -14,7 +14,9 @@ import websockets
 _extension_ws = None
 _pending: dict = {}           # id -> concurrent.futures.Future
 _loop: asyncio.AbstractEventLoop = None
+_thread: threading.Thread | None = None
 _lock = threading.Lock()
+_start_lock = threading.Lock()
 _ready = threading.Event()   # сигнал что сервер реально слушает
 
 def _log(msg):
@@ -90,23 +92,35 @@ def _run_thread():
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     _free_port(9009)
-    _loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_loop)
+    loop = asyncio.new_event_loop()
+    _loop = loop
+    asyncio.set_event_loop(loop)
     _log("[Bridge] Thread started, running event loop")
-    _loop.run_until_complete(_serve())
+    try:
+        loop.run_until_complete(_serve())
+    finally:
+        if _loop is loop:
+            _loop = None
+        _ready.set()
+        loop.close()
 
 
 def is_running() -> bool:
     """Возвращает True если WS сервер уже запущен."""
-    return _loop is not None
+    loop = _loop
+    return loop is not None and loop.is_running()
 
 
 def start_thread():
     """Запускает WS сервер в фоновом потоке. Вызвать один раз при старте."""
-    if is_running():
-        return
-    t = threading.Thread(target=_run_thread, daemon=True, name="ws-bridge")
-    t.start()
+    global _thread
+    with _start_lock:
+        if is_running():
+            return
+        if _thread is None or not _thread.is_alive():
+            _ready.clear()
+            _thread = threading.Thread(target=_run_thread, daemon=True, name="ws-bridge")
+            _thread.start()
     # Ждём пока сервер реально начнёт слушать (или упадёт)
     _ready.wait(timeout=5.0)
 
