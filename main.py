@@ -33,6 +33,9 @@ _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from ui_automation.logging_config import setup_error_logging
+setup_error_logging()
+
 os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,::1")
 os.environ.setdefault("no_proxy", "localhost,127.0.0.1,::1")
 

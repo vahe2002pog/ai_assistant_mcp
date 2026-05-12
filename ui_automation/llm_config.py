@@ -97,6 +97,38 @@ _vision_client: Optional[openai.OpenAI] = None
 _vision_client_key: Optional[tuple] = None
 
 
+def _provider_settings(s: dict) -> dict:
+    settings = s.setdefault("provider_settings", {})
+    if not isinstance(settings, dict):
+        settings = {}
+        s["provider_settings"] = settings
+    return settings
+
+
+def _remember_provider_settings(s: dict, provider: str) -> None:
+    if not provider:
+        return
+    settings = _provider_settings(s)
+    item = settings.setdefault(provider, {})
+    if not isinstance(item, dict):
+        item = {}
+        settings[provider] = item
+    if s.get("base_url") is not None:
+        item["base_url"] = s.get("base_url", "")
+    if s.get("model") is not None:
+        item["model"] = s.get("model", "")
+    if s.get("vision_model") is not None:
+        item["vision_model"] = s.get("vision_model", "")
+
+
+def _saved_provider_setting(s: dict, provider: str, key: str, default: str = "") -> str:
+    item = _provider_settings(s).get(provider, {})
+    if not isinstance(item, dict):
+        return default
+    value = item.get(key)
+    return str(value) if value is not None else default
+
+
 def _load() -> dict:
     global _state
     if _state is not None:
@@ -132,6 +164,9 @@ def _load() -> dict:
     # vision_provider/vision_base_url: пусто = использовать основные
     s.setdefault("vision_provider", "")
     s.setdefault("vision_base_url", "")
+    s.setdefault("ui_theme", "dark")
+    _provider_settings(s)
+    _remember_provider_settings(s, prov_name)
 
     # api_key/folder — из БД (шифрованно); для локальных провайдеров подставляем
     # технический ключ по умолчанию ("llama"/"ollama"), чтобы OpenAI SDK не ругался.
@@ -181,6 +216,17 @@ def get() -> dict:
 
 def get_provider() -> str:
     return get()["provider"]
+
+
+def get_provider_ui_settings(provider: str) -> dict:
+    """Saved non-secret UI settings for one provider."""
+    s = get()
+    prov = PROVIDERS.get(provider, PROVIDERS["custom"])
+    return {
+        "base_url": _saved_provider_setting(s, provider, "base_url", prov["base_url"]),
+        "model": _saved_provider_setting(s, provider, "model", ""),
+        "vision_model": _saved_provider_setting(s, provider, "vision_model", ""),
+    }
 
 
 def _yandex_format(model: str, folder: str) -> str:
@@ -248,6 +294,16 @@ def get_vision_extra_body() -> dict:
     return _vision_view(get())["extra_body"]
 
 
+def is_vision_configured() -> bool:
+    """Return False when screenshots would be sent to an obviously text-only model."""
+    s = get()
+    vm = (s.get("vision_model") or "").strip()
+    vp = (s.get("vision_provider") or "").strip()
+    if vm or vp:
+        return True
+    return _guess_vision_by_name(s.get("model", ""))
+
+
 def get_vision_client() -> openai.OpenAI:
     """OpenAI-клиент для vision-вызовов. Если vision-провайдер не задан или
     совпадает с основным — возвращает основной клиент (без дублирования)."""
@@ -305,16 +361,27 @@ def set_config(provider: Optional[str] = None,
                folder: Optional[str] = None,
                vision_provider: Optional[str] = None,
                vision_base_url: Optional[str] = None,
-               vision_api_key: Optional[str] = None) -> dict:
+               vision_api_key: Optional[str] = None,
+               ui_theme: Optional[str] = None) -> dict:
     """Обновляет конфигурацию. При смене провайдера без явного base_url/api_key
     подставляются дефолты выбранного провайдера."""
     global _client, _client_key, _vision_client, _vision_client_key
     with _lock:
         s = _load()
         if provider and provider in PROVIDERS:
+            old_provider = s.get("provider")
+            if old_provider:
+                _remember_provider_settings(s, old_provider)
             if provider != s.get("provider"):
                 prov = PROVIDERS[provider]
-                s["base_url"] = base_url or prov["base_url"]
+                saved_base = _saved_provider_setting(s, provider, "base_url", prov["base_url"])
+                saved_model = _saved_provider_setting(s, provider, "model", s.get("model", ""))
+                saved_vision_model = _saved_provider_setting(s, provider, "vision_model", s.get("vision_model", ""))
+                s["base_url"] = base_url or saved_base or prov["base_url"]
+                if saved_model:
+                    s["model"] = saved_model
+                if saved_vision_model is not None:
+                    s["vision_model"] = saved_vision_model
                 # Подтягиваем ранее сохранённые секреты для выбранного провайдера.
                 stored_key, stored_folder = _provider_secrets(provider)
                 s["api_key"] = api_key or stored_key or prov["api_key"]
@@ -356,6 +423,10 @@ def set_config(provider: Optional[str] = None,
 
         # Сохраняем секреты в БД (шифрованно) — только если пользователь что-то
         # ввёл, чтобы не перезаписать технический дефолт ("llama"/"ollama").
+        if ui_theme is not None:
+            s["ui_theme"] = "light" if str(ui_theme).strip().lower() == "light" else "dark"
+        _remember_provider_settings(s, s.get("provider", ""))
+
         try:
             import database as _db
             cur_prov = s["provider"]

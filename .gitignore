@@ -1,6 +1,8 @@
 **/__pycache__/
 cache_debug.log
 cache.db
+cache.db-*
+logs/
 mcp_modules/UIAutomationMCP/*
 TOOLS_DOCUMENTATION.md
 @AutomationLog.txt

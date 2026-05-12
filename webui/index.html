@@ -11,6 +11,20 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Color+Emoji&display=swap" rel="stylesheet" />
+    <script>
+      (() => {
+        const fromCookie = () => {
+          const item = document.cookie.split("; ").find(x => x.startsWith("compass_theme="));
+          return item ? decodeURIComponent(item.split("=").slice(1).join("=")) : "";
+        };
+        let saved = "";
+        try { saved = localStorage.getItem("compass_theme") || ""; } catch (_) {}
+        saved = saved || fromCookie();
+        const theme = saved === "light" ? "light" : "dark";
+        document.documentElement.classList.remove("dark", "light");
+        document.documentElement.classList.add(theme);
+      })();
+    </script>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
@@ -47,6 +61,14 @@
             <span id="model-name">локальная модель</span>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
+          <button id="theme-toggle" class="theme-toggle" type="button" title="Сменить тему" aria-label="Сменить тему">
+            <span class="theme-sun" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+            </span>
+            <span class="theme-moon" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 7.2A9 9 0 1 1 12 3z"/></svg>
+            </span>
+          </button>
           <div id="settings-panel" class="settings-panel hidden">
             <div class="settings-row">
               <label>Провайдер</label>
@@ -73,6 +95,13 @@
             </div>
             <div class="settings-row">
               <input id="sel-model-custom" type="text" placeholder="или введи имя модели вручную" spellcheck="false" />
+            </div>
+            <div class="settings-row safety-row">
+              <label>Безопасный режим</label>
+              <button id="safety-toggle" class="switch on" type="button" role="switch" aria-checked="true" title="Включает или отключает safety-guard">
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+                <span id="safety-label" class="switch-label">Включён</span>
+              </button>
             </div>
             <div id="vision-block">
               <div class="settings-row settings-section">

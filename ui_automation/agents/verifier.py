@@ -50,6 +50,13 @@ class Verifier:
                 reason="no expected_outcome provided",
             )
 
+        if hasattr(_llm, "is_vision_configured") and not _llm.is_vision_configured():
+            return VerificationResult(
+                step_id=step.step_id,
+                verdict=VerificationVerdict.UNCERTAIN,
+                reason="vision verifier skipped: configured model is text-only",
+            )
+
         b64, path = self._screenshot()
         if not b64:
             return VerificationResult(
@@ -85,6 +92,21 @@ class Verifier:
                 step_id=step.step_id,
                 verdict=VerificationVerdict.UNCERTAIN,
                 reason="LLM unreachable",
+                screenshot_path=path,
+            )
+        except openai.BadRequestError as e:
+            msg = str(e)
+            if "image_url" in msg or "expected `text`" in msg:
+                return VerificationResult(
+                    step_id=step.step_id,
+                    verdict=VerificationVerdict.UNCERTAIN,
+                    reason="vision verifier skipped: provider rejected image input",
+                    screenshot_path=path,
+                )
+            return VerificationResult(
+                step_id=step.step_id,
+                verdict=VerificationVerdict.UNCERTAIN,
+                reason=f"verifier request rejected: {e}",
                 screenshot_path=path,
             )
         except Exception as e:

@@ -13,6 +13,7 @@ const newChatBtn = $("#new-chat");
 const attachBtn = $("#attach-btn");
 const fileInput = $("#file-input");
 const attachPreview = $("#attach-preview");
+const themeToggle = $("#theme-toggle");
 
 let currentConvId = null;
 const inflightConvs = new Set();      // conv_id'шники с активным запросом
@@ -26,6 +27,55 @@ let pendingQuote = "";
 const quoteChip = document.getElementById("quote-chip");
 const quoteChipText = document.getElementById("quote-chip-text");
 const quoteChipRm = document.getElementById("quote-chip-rm");
+
+function readStoredTheme() {
+  try {
+    const saved = localStorage.getItem("compass_theme");
+    if (saved === "light" || saved === "dark") return saved;
+  } catch (_) {}
+  const item = document.cookie.split("; ").find(x => x.startsWith("compass_theme="));
+  if (item) {
+    const saved = decodeURIComponent(item.split("=").slice(1).join("="));
+    if (saved === "light" || saved === "dark") return saved;
+  }
+  return "";
+}
+
+function storeTheme(theme) {
+  try { localStorage.setItem("compass_theme", theme); } catch (_) {}
+  document.cookie = `compass_theme=${encodeURIComponent(theme)}; path=/; max-age=31536000; SameSite=Lax`;
+}
+
+async function saveTheme(theme) {
+  try {
+    await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ui_theme: theme }),
+    });
+  } catch (_) {}
+}
+
+const initialStoredTheme = readStoredTheme();
+
+function applyTheme(theme, options = {}) {
+  const next = theme === "light" ? "light" : "dark";
+  document.documentElement.classList.toggle("light", next === "light");
+  document.documentElement.classList.toggle("dark", next !== "light");
+  if (options.persist !== false) storeTheme(next);
+  if (themeToggle) {
+    themeToggle.title = next === "light" ? "Включить тёмную тему" : "Включить светлую тему";
+    themeToggle.setAttribute("aria-label", themeToggle.title);
+  }
+}
+applyTheme(initialStoredTheme || "dark", { persist: false });
+if (themeToggle) {
+  themeToggle.addEventListener("click", () => {
+    const next = document.documentElement.classList.contains("light") ? "dark" : "light";
+    applyTheme(next);
+    saveTheme(next);
+  });
+}
 
 function setPendingQuote(text) {
   pendingQuote = (text || "").trim();
@@ -458,6 +508,7 @@ function connectEvents() {
       if (!settingsPanel.classList.contains("hidden")) {
         selProvider.value = cfg.provider;
         selBase.value = cfg.base_url;
+        setSafetyToggle(cfg.safety_mode || "strict");
       }
     } catch (_) {}
   });
@@ -756,6 +807,20 @@ const selVisionModelCustom = $("#sel-vision-model-custom");
 const visionBaseRow = $("#vision-base-row");
 const visionApiKeyRow = $("#vision-apikey-row");
 const refreshVisionModelsBtn = $("#refresh-vision-models");
+const safetyToggle = $("#safety-toggle");
+const safetyLabel = $("#safety-label");
+
+function setSafetyToggle(mode) {
+  const on = (mode || "strict") !== "off";
+  safetyToggle.classList.toggle("on", on);
+  safetyToggle.classList.toggle("off", !on);
+  safetyToggle.setAttribute("aria-checked", on ? "true" : "false");
+  safetyLabel.textContent = on ? "Включён" : "Отключён";
+}
+
+function getSafetyModeFromToggle() {
+  return safetyToggle.classList.contains("off") ? "off" : "strict";
+}
 
 function updateVisionProviderRowsVisibility() {
   // Пусто = "как основной" — прячем base/key.
@@ -791,6 +856,10 @@ async function loadConfig() {
     updateFolderVisibility();
     selApiKey.value = "";
     selApiKey.placeholder = currentCfg.api_key_set ? "••• ключ сохранён (введите, чтобы заменить)" : "токен провайдера";
+    setSafetyToggle(currentCfg.safety_mode || "strict");
+    if (!initialStoredTheme && currentCfg.ui_theme) {
+      applyTheme(currentCfg.ui_theme);
+    }
 
     // Vision: "" = использовать основной; иначе один из providers.
     selVisionProvider.innerHTML =
@@ -821,8 +890,9 @@ const _renderOpt = (m) => {
   return `<option value="${_escHtml(x.id)}" title="${title}">${_escHtml(x.id)}${badge}</option>`;
 };
 
-async function _fetchModels(baseUrl, apiKey) {
+async function _fetchModels(baseUrl, apiKey, provider) {
   let url = "/api/models?base_url=" + encodeURIComponent(baseUrl);
+  if (provider) url += "&provider=" + encodeURIComponent(provider);
   if (apiKey) url += "&api_key=" + encodeURIComponent(apiKey);
   const r = await fetch(url);
   return r.json();
@@ -831,7 +901,7 @@ async function _fetchModels(baseUrl, apiKey) {
 async function refreshModels() {
   selModel.innerHTML = `<option value="">(загрузка…)</option>`;
   try {
-    const d = await _fetchModels(selBase.value, selApiKey.value.trim());
+    const d = await _fetchModels(selBase.value, selApiKey.value.trim(), selProvider.value);
     const list = d.models || [];
     const groups = d.groups;
     if (!list.length) {
@@ -848,8 +918,12 @@ async function refreshModels() {
       selModel.innerHTML = list.map(_renderOpt).join("");
     }
     const ids = list.map(m => _normModel(m).id);
-    if (currentCfg && ids.includes(currentCfg.model)) {
-      selModel.value = currentCfg.model;
+    const desiredModel = (selModelCustom.value.trim() || (currentCfg && currentCfg.model) || "").trim();
+    if (desiredModel && ids.includes(desiredModel)) {
+      selModel.value = desiredModel;
+      selModelCustom.value = "";
+    } else if (desiredModel) {
+      selModelCustom.value = desiredModel;
     }
   } catch (_) {
     selModel.innerHTML = `<option value="">(ошибка)</option>`;
@@ -863,7 +937,7 @@ async function refreshVisionModels() {
     const useCustom = !!selVisionProvider.value;
     const base = useCustom ? selVisionBase.value : selBase.value;
     const key = useCustom ? selVisionApiKey.value.trim() : selApiKey.value.trim();
-    const d = await _fetchModels(base, key);
+    const d = await _fetchModels(base, key, useCustom ? selVisionProvider.value : selProvider.value);
     const list = (d.models || []).map(_normModel);
     // Не фильтруем список: некоторые провайдеры не отдают корректный vision-флаг,
     // но модель всё равно может принимать изображения.
@@ -885,6 +959,7 @@ async function refreshVisionModels() {
 selProvider.addEventListener("change", () => {
   const p = providers.find(x => x.id === selProvider.value);
   if (p) selBase.value = p.base_url;
+  selModelCustom.value = (p && p.model) ? p.model : "";
   selApiKey.value = "";
   selApiKey.placeholder = (p && p.api_key_set)
     ? "••• ключ сохранён (введите, чтобы заменить)"
@@ -918,6 +993,9 @@ selVisionProvider.addEventListener("change", () => {
 selVisionBase.addEventListener("change", refreshVisionModels);
 selVisionApiKey.addEventListener("change", refreshVisionModels);
 refreshVisionModelsBtn.addEventListener("click", refreshVisionModels);
+safetyToggle.addEventListener("click", () => {
+  setSafetyToggle(getSafetyModeFromToggle() === "off" ? "strict" : "off");
+});
 
 modelPill.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -941,6 +1019,8 @@ saveBtn.addEventListener("click", async () => {
     folder: selFolder.value.trim(),
     vision_provider: selVisionProvider.value,
     vision_base_url: selVisionProvider.value ? selVisionBase.value.trim() : "",
+    safety_mode: getSafetyModeFromToggle(),
+    ui_theme: document.documentElement.classList.contains("light") ? "light" : "dark",
   };
   const apiKey = selApiKey.value.trim();
   if (apiKey) body.api_key = apiKey;
@@ -961,6 +1041,7 @@ saveBtn.addEventListener("click", async () => {
     updatePill(currentCfg);
     selModelCustom.value = "";
     selVisionModelCustom.value = "";
+    setSafetyToggle(currentCfg.safety_mode || "strict");
     selApiKey.value = "";
     selVisionApiKey.value = "";
     selVisionApiKey.placeholder = currentCfg.vision_api_key_set

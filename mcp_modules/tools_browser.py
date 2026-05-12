@@ -3,9 +3,36 @@ Browser tools — управление браузером через Chrome ра
 Команды отправляются напрямую через ws_server (WebSocket поток внутри процесса).
 """
 import asyncio
+import concurrent.futures
 import json
 import urllib.parse
+import urllib.request
 from mcp_modules.mcp_core import mcp
+from ui_automation.safety import blocked_message, check_tool_call
+
+
+def _is_not_connected(result: dict) -> bool:
+    return isinstance(result, dict) and "not connected" in str(result.get("error", "")).lower()
+
+
+def _send_http_bridge(command: str, params: dict = None, timeout: float = 15.0) -> dict | None:
+    """Fallback for the standalone bridge process (browser_extension/ws_bridge.py)."""
+    try:
+        body = json.dumps({
+            "command": command,
+            "params": params or {},
+            "timeout": timeout,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:9010/command",
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout + 2) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+    except Exception:
+        return None
 
 
 def _send_sync(command: str, params: dict = None, timeout: float = 15.0) -> dict:
@@ -18,18 +45,35 @@ def _send_sync(command: str, params: dict = None, timeout: float = 15.0) -> dict
             _ws.start_thread()
 
         # Запускаем корутину в event loop ws_server
-        import concurrent.futures
-        import concurrent.futures
+        if _ws._loop is None:
+            fallback = _send_http_bridge(command, params, timeout)
+            if fallback is not None:
+                return fallback
+            return {"error": "Chrome extension not connected"}
         future = asyncio.run_coroutine_threadsafe(
             _ws.send_command(command, params or {}, timeout=timeout),
             _ws._loop,
         )
-        return future.result(timeout=timeout + 2)
+        result = future.result(timeout=timeout + 2)
+        if _is_not_connected(result):
+            fallback = _send_http_bridge(command, params, timeout)
+            if fallback is not None:
+                return fallback
+        return result
     except concurrent.futures.TimeoutError:
+        fallback = _send_http_bridge(command, params, timeout)
+        if fallback is not None:
+            return fallback
         return {"error": "Chrome extension not connected"}
     except RuntimeError as e:
+        fallback = _send_http_bridge(command, params, timeout)
+        if fallback is not None:
+            return fallback
         return {"error": str(e) or "Chrome extension not connected"}
     except Exception as e:
+        fallback = _send_http_bridge(command, params, timeout)
+        if fallback is not None:
+            return fallback
         return {"error": str(e)}
 
 
@@ -94,6 +138,9 @@ async def browser_navigate(url: str) -> str:
     Args:
         url: Полный URL для перехода.
     """
+    safety = check_tool_call("browser_navigate", {"url": url})
+    if not safety.allowed:
+        return blocked_message(safety.reason)
     result = await _send("navigate", {"url": url})
     if "error" in result:
         if "not connected" in result["error"].lower():
@@ -123,6 +170,9 @@ async def browser_input_text(index: int, text: str) -> str:
         index: Индекс поля ввода из browser_get_state.
         text: Текст для ввода.
     """
+    safety = check_tool_call("browser_input_text", {"index": index, "text": text})
+    if not safety.allowed:
+        return blocked_message(safety.reason)
     result = await _send("input_text", {"index": index, "text": text})
     if "error" in result:
         return f"Ошибка: {result['error']}"
@@ -230,6 +280,9 @@ async def browser_search_google(query: str) -> str:
         query: Поисковый запрос.
     """
     url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+    safety = check_tool_call("browser_navigate", {"url": url})
+    if not safety.allowed:
+        return blocked_message(safety.reason)
     result = await _send("navigate", {"url": url})
     if "error" in result:
         return f"Ошибка: {result['error']}"

@@ -36,9 +36,53 @@ _APP_FAILURE_HINTS = (
 )
 
 
+_WORKER_LIMIT_HINTS = (
+    "превышен лимит действий подагента",
+    "достигнут лимит действий подагента",
+    "exceeded",
+    "tool call limit",
+)
+_IMAGE_PATH_RE = re.compile(
+    r'([A-Za-z]:[\\/][^\s,\]\[<>"\']+?\.(?:png|jpe?g|webp|gif|bmp))',
+    re.IGNORECASE,
+)
+
+
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     low = (text or "").lower()
     return any(needle in low for needle in needles)
+
+
+def _last_worker_limit_failure(results: List[StepResult]) -> str:
+    if not results:
+        return ""
+    last = results[-1]
+    if last.status != StepStatus.FAILURE:
+        return ""
+    text = " ".join(
+        part for part in (
+            last.summary,
+            last.error.message if last.error else "",
+        )
+        if part
+    )
+    return text if _contains_any(text, _WORKER_LIMIT_HINTS) else ""
+
+
+def _attached_image_step(goal: str, history: List[StepSpec]) -> Optional[StepSpec]:
+    if not _IMAGE_PATH_RE.search(goal or ""):
+        return None
+    if any(step.agent == AgentType.VISION for step in history):
+        return None
+    return StepSpec(
+        agent=AgentType.VISION,
+        action_type="subtask",
+        target=Target(),
+        parameters={"task": (goal or "").strip()},
+        expected_outcome="Распознано содержимое прикреплённого изображения.",
+        requires_verification=False,
+        max_retries=0,
+    )
 
 
 def _web_request_from_failed_step(task_text: str, goal: str) -> str:
@@ -310,9 +354,23 @@ class Planner:
         chat_history — текст предыдущих сообщений в чате (user/assistant), чтобы
         планировщик понимал контекст диалога, а не только последнее сообщение.
         """
+        attached_step = _attached_image_step(goal, history)
+        if attached_step is not None:
+            return attached_step
+
         web_fallback = _web_fallback_after_app_failure(goal, history, results)
         if web_fallback is not None:
             return web_fallback
+        limit_failure = _last_worker_limit_failure(results)
+        if limit_failure:
+            return DoneMarker(
+                (
+                    "Подагент исчерпал лимит действий до завершения шага. "
+                    "Я остановил перепланирование, чтобы не зациклиться на пустом шаге. "
+                    f"Последний результат: {limit_failure}"
+                ),
+                success=False,
+            )
 
         history_block = self._format_history(history, results)
         prompt = (
@@ -433,8 +491,7 @@ class Planner:
                 "type", "typing", "keyboard",
             )
         )
-        if not (wants_enter and wants_typing):
-            return None
+        keyboard_mode = wants_enter and wants_typing
 
         domain_re = re.compile(
             r"^\s*(?:https?://)?"
@@ -455,8 +512,43 @@ class Planner:
             seen.add(domain)
             domains.append(domain)
 
-        if len(domains) < 2:
-            return None
+        if not keyboard_mode or len(domains) < 2:
+            browser_terms = (
+                "модеус", "modeus", "браузер", "вкладк", "страниц", "сайт",
+                "портал", "личный кабинет", "кабинет", "лк", "youtube",
+                "ютуб", "google", "chrome",
+            )
+            web_terms = (
+                "найди", "поищи", "погугли", "актуальн", "новост", "погода",
+                "цена", "курс", "расписан", "дата", "число",
+            )
+            system_terms = (
+                "открой приложение", "запусти", "файл", "папк", "word", "excel",
+                "powerpoint", "громкость", "окно", "нажми", "введи",
+            )
+
+            if any(term in low for term in browser_terms):
+                agent = AgentType.BROWSER
+                expected = "Найдена нужная информация на странице или честно указано, что она не найдена."
+            elif any(term in low for term in web_terms):
+                agent = AgentType.WEB
+                expected = "Найдена актуальная информация из веб-источника или открыта нужная страница."
+            elif any(term in low for term in system_terms):
+                agent = AgentType.SYSTEM
+                expected = "Выполнено действие в системе или возвращена понятная причина невозможности."
+            else:
+                agent = AgentType.CHAT
+                expected = "Дан полезный ответ пользователю."
+
+            return StepSpec(
+                agent=agent,
+                action_type="subtask",
+                target=Target(),
+                parameters={"task": (goal or "").strip()},
+                expected_outcome=expected,
+                requires_verification=agent in (AgentType.SYSTEM, AgentType.BROWSER),
+                max_retries=1,
+            )
 
         return StepSpec(
             agent=AgentType.SYSTEM,

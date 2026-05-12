@@ -31,6 +31,8 @@ from ui_automation import cancel as _cancel
 from ui_automation import sources as _sources
 from ui_automation import touched_files as _touched
 from ui_automation import llm_config as _llm
+from ui_automation.logging_config import log_error, log_warning
+from ui_automation.safety import blocked_message, check_tool_call, trusted_tool_call
 
 # ── Контекст-компакция ────────────────────────────────────────────────────────
 _CTX_LIMIT_TOKENS = int(os.environ.get("AGENT_CTX_LIMIT", "50000"))
@@ -39,7 +41,7 @@ _CTX_KEEP_TURNS   = int(os.environ.get("AGENT_CTX_KEEP_TURNS", "4"))
 # ── Budget: макс. tool_call'ов внутри одного execute() ───────────────────────
 # Крупные значения → worker блуждает по UI; малые → Controller чаще
 # перепланирует, что дешевле и даёт Perceiver'у свежий снимок мира.
-_MAX_TOOL_CALLS = int(os.environ.get("AGENT_MAX_TOOL_CALLS", "6"))
+_MAX_TOOL_CALLS = int(os.environ.get("AGENT_MAX_TOOL_CALLS", "12"))
 
 # ── Perceive-cache: короткоживущий кэш read-only "снимков мира" ──────────────
 # Идея: если worker только что вызвал ui_get_foreground, и через долю секунды
@@ -484,6 +486,10 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
         if fn is None:
             return f"Инструмент '{name}' не найден."
 
+        safety = check_tool_call(name, args, getattr(self, "_active_task", ""))
+        if not safety.allowed:
+            return blocked_message(safety.reason)
+
         # ── Perceive-cache (read-only) ────────────────────────────────────────
         args_key = ""
         cacheable = name in _PERCEIVE_CACHEABLE
@@ -498,12 +504,14 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
                 return cached
 
         try:
-            if inspect.iscoroutinefunction(fn):
-                result = asyncio.run(fn(**args))
-            else:
-                result = fn(**args)
+            with trusted_tool_call():
+                if inspect.iscoroutinefunction(fn):
+                    result = asyncio.run(fn(**args))
+                else:
+                    result = fn(**args)
             text = _resolve_special(str(result) if result is not None else "")
         except Exception as e:
+            log_error("tool call failed", e, tool=name, args=args)
             return f"Ошибка {name}: {e}"
 
         if cacheable:
@@ -511,6 +519,9 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
         else:
             # Любое не-read-only действие делает прошлые снимки неактуальными.
             _perceive_cache_invalidate()
+
+        if text.startswith(("Ошибка", "Блокировано safety-guard")):
+            log_warning("tool returned non-success", tool=name, args=args, result=text)
 
         # Регистрируем затронутый файл/папку — это попадёт в FilesBlock ответа.
         try:
@@ -530,6 +541,7 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
             {"role": "system", "content": self.SYSTEM_PROMPT},
             {"role": "user",   "content": task},
         ]
+        self._active_task = task
         # Print only the first line (the actual subtask), context blocks follow after blank line
         first_line = task.split("\n")[0]
         print(f"\n[{self.name}] {first_line}", flush=True)
@@ -573,6 +585,7 @@ ui_send_keys — ТОЛЬКО текст или горячие клавиши ("
             except openai.APIConnectionError:
                 return "Ошибка: нет соединения с моделью."
             except Exception as e:
+                log_error("tool agent LLM call failed", e, agent=self.name)
                 return f"Ошибка LLM: {e}"
 
             msg = response.choices[0].message

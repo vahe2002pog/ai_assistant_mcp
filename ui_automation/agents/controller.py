@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional
 
 from ui_automation import utils
+from ui_automation.logging_config import log_error
+from ui_automation.safety import blocked_message, check_step
 from ui_automation.agents.contracts import (
     AgentType, ErrorClass, ErrorInfo, ExecutionTrace,
     Plan, StepResult, StepSpec, StepStatus,
@@ -75,6 +77,7 @@ class Controller:
         trace = ExecutionTrace(
             task_id=plan.task_id, user_request=goal, plan=plan,
         )
+        self._current_goal = goal
 
         utils.print_with_color(f"[Controller] goal: {goal}", "magenta")
 
@@ -214,6 +217,13 @@ class Controller:
                             message=f"verifier rejected: {v.reason}",
                         )
                 except Exception as e:
+                    log_error(
+                        "controller verifier exception",
+                        e,
+                        step_id=step.step_id,
+                        agent=step.agent.value,
+                        action=step.action_type,
+                    )
                     utils.print_with_color(f"[Controller] verifier crashed: {e}", "yellow")
 
             trace.add_result(result)
@@ -293,6 +303,19 @@ class Controller:
                 finished_at=time.time(),
             )
 
+        safety = check_step(step, getattr(self, "_current_goal", ""))
+        if not safety.allowed:
+            return StepResult(
+                step_id=step.step_id,
+                status=StepStatus.FAILURE,
+                error=ErrorInfo(
+                    error_class=ErrorClass.SECURITY,
+                    message=blocked_message(safety.reason),
+                ),
+                summary=blocked_message(safety.reason),
+                finished_at=time.time(),
+            )
+
         started = time.time()
         last_error: Optional[ErrorInfo] = None
         for attempt in range(step.max_retries + 1):
@@ -315,6 +338,14 @@ class Controller:
                 )
                 time.sleep(min(2 ** attempt, 4))
             except Exception as e:
+                log_error(
+                    "controller worker exception",
+                    e,
+                    step_id=step.step_id,
+                    agent=step.agent.value,
+                    action=step.action_type,
+                    attempt=attempt,
+                )
                 last_error = ErrorInfo(
                     error_class=ErrorClass.UNKNOWN,
                     message=str(e),

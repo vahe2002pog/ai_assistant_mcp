@@ -40,6 +40,9 @@ _WEBUI_DIR = os.path.join(_ROOT, "webui")
 _ATTACH_DIR = os.path.join(_ROOT, "attachments")
 os.makedirs(_ATTACH_DIR, exist_ok=True)
 
+from ui_automation.logging_config import setup_error_logging, log_error
+setup_error_logging()
+
 # ── Карты: инструмент/агент → человекочитаемая фраза ─────────────────────
 _TOOL_STATUS = {
     "web_search": "Ищу в интернете…",
@@ -679,16 +682,26 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/config":
             from ui_automation import llm_config as _llm
+            from ui_automation import safety as _safety
             import database as _db
             cfg = _llm.get()
-            providers = [{"id": k, "label": v["label"], "base_url": v["base_url"],
-                          "api_key_set": _db.provider_key_has(k)}
-                         for k, v in _llm.PROVIDERS.items()]
+            providers = []
+            for k, v in _llm.PROVIDERS.items():
+                saved = _llm.get_provider_ui_settings(k)
+                providers.append({
+                    "id": k,
+                    "label": v["label"],
+                    "base_url": saved.get("base_url") or v["base_url"],
+                    "model": saved.get("model") or "",
+                    "vision_model": saved.get("vision_model") or "",
+                    "api_key_set": _db.provider_key_has(k),
+                })
             safe_cfg = dict(cfg)
             safe_cfg["api_key_set"] = bool(cfg.get("api_key"))
             safe_cfg.pop("api_key", None)
             vp = (cfg.get("vision_provider") or "").strip()
             safe_cfg["vision_api_key_set"] = _db.provider_key_has(vp) if vp else safe_cfg["api_key_set"]
+            safe_cfg["safety_mode"] = _safety.get_safety_mode()
             self._send_json(200, {"config": safe_cfg, "providers": providers})
             return
 
@@ -697,12 +710,21 @@ class Handler(BaseHTTPRequestHandler):
             qs = self.path.split("?", 1)[1] if "?" in self.path else ""
             base = None
             api_key = None
+            provider = None
             import urllib.parse as _up
             for part in qs.split("&"):
                 if part.startswith("base_url="):
                     base = _up.unquote(part[len("base_url="):])
                 elif part.startswith("api_key="):
                     api_key = _up.unquote(part[len("api_key="):])
+                elif part.startswith("provider="):
+                    provider = _up.unquote(part[len("provider="):])
+            if provider and api_key is None:
+                try:
+                    import database as _db
+                    api_key, _folder = _db.provider_key_get(provider)
+                except Exception:
+                    api_key = None
             groups = _llm.list_model_groups(base_url=base, api_key=api_key)
             if groups:
                 # groups[i]["models"] — список dict'ов {id, vision}
@@ -886,7 +908,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/config":
             from ui_automation import llm_config as _llm
+            from ui_automation import safety as _safety
             req = self._read_json() or {}
+            safety_mode = req.get("safety_mode")
             cfg = _llm.set_config(
                 provider=req.get("provider"),
                 model=req.get("model"),
@@ -897,13 +921,17 @@ class Handler(BaseHTTPRequestHandler):
                 vision_provider=req.get("vision_provider"),
                 vision_base_url=req.get("vision_base_url"),
                 vision_api_key=req.get("vision_api_key"),
+                ui_theme=req.get("ui_theme"),
             )
+            if safety_mode is not None:
+                _safety.set_safety_mode(str(safety_mode))
             safe_cfg = dict(cfg)
             safe_cfg["api_key_set"] = bool(cfg.get("api_key"))
             safe_cfg.pop("api_key", None)
             import database as _db
             vp = (cfg.get("vision_provider") or "").strip()
             safe_cfg["vision_api_key_set"] = _db.provider_key_has(vp) if vp else safe_cfg["api_key_set"]
+            safe_cfg["safety_mode"] = _safety.get_safety_mode()
             BROKER.emit("config_updated", safe_cfg)
             self._send_json(200, {"config": safe_cfg})
             return

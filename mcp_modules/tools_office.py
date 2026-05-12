@@ -12,6 +12,12 @@ from typing import Tuple
 
 from .mcp_core import mcp
 from .office_core import Officer, SUPPORTED_APPS
+from ui_automation.safety import blocked_message, check_tool_call
+
+
+def _guard(name: str, args: dict) -> str:
+    decision = check_tool_call(name, args)
+    return "" if decision.allowed else blocked_message(decision.reason)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -128,6 +134,9 @@ def com_run_python(code: str, data: str = "") -> str:
     Если не уверен в ProgID/методах — используй office_docs_search.
     ВНИМАНИЕ: код выполняется в текущем процессе без песочницы.
     """
+    blocked = _guard("com_run_python", {"code": code, "data": data})
+    if blocked:
+        return blocked
     try:
         import win32com
         import win32com.client
@@ -169,6 +178,9 @@ def office_close_dialogs(app_name: str = "") -> str:
 
     app_name: Word | Excel | PowerPoint | Outlook. Пусто = все Office-процессы.
     """
+    blocked = _guard("office_close_dialogs", {"app_name": app_name})
+    if blocked:
+        return blocked
     try:
         import win32gui
         import win32process
@@ -708,6 +720,9 @@ def office_quit(app_name: str, force: bool = False) -> str:
     app_name: Word | Excel | PowerPoint | Outlook
     force: если True — убивает процесс через TerminateProcess
     """
+    blocked = _guard("office_quit", {"app_name": app_name, "force": force})
+    if blocked:
+        return blocked
     ok = Officer.quit(app_name, force=force)
     return f"{app_name} закрыт" if ok else f"Не удалось закрыть {app_name}"
 
@@ -719,6 +734,9 @@ def office_visible(app_name: str, visible: bool) -> str:
     app_name: Word | Excel | PowerPoint | Outlook
     visible: True/False
     """
+    blocked = _guard("office_visible", {"app_name": app_name, "visible": visible})
+    if blocked:
+        return blocked
     value = Officer.visible(app_name, visible)
     return f"{app_name}.Visible = {value}"
 
@@ -745,6 +763,9 @@ def office_run_python(code: str, data: str = "") -> str:
 
     ВНИМАНИЕ: код выполняется в текущем процессе без песочницы.
     """
+    blocked = _guard("office_run_python", {"code": code, "data": data})
+    if blocked:
+        return blocked
     namespace = {
         "Officer": Officer,
         "resolve_path": _resolve_office_path,

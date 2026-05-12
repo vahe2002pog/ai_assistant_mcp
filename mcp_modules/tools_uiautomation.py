@@ -17,6 +17,12 @@ from pywinauto import Desktop
 from pywinauto.keyboard import send_keys as _send_keys
 
 from .mcp_core import mcp
+from ui_automation.safety import blocked_message, check_tool_call
+
+
+def _guard(name: str, args: dict) -> str:
+    decision = check_tool_call(name, args)
+    return "" if decision.allowed else blocked_message(decision.reason)
 
 
 # ─── перевод человекочитаемых клавиш в синтаксис pywinauto ──────────────────
@@ -416,6 +422,9 @@ def ui_click(title_re: str = "", x: Optional[int] = None, y: Optional[int] = Non
         button: 'left' | 'right' | 'middle' (по умолчанию 'left').
         double: Двойной клик (по умолчанию False).
     """
+    blocked = _guard("ui_click", {"title_re": title_re, "x": x, "y": y, "button": button, "double": double})
+    if blocked:
+        return blocked
     try:
         import pyautogui
         before = _snapshot(title_re)
@@ -458,6 +467,9 @@ def ui_click_element(text: str, title_re: str = "", double: bool = False) -> str
         title_re: Заголовок окна (регулярное выражение).
         double: Двойной клик (по умолчанию False).
     """
+    blocked = _guard("ui_click_element", {"text": text, "title_re": title_re, "double": double})
+    if blocked:
+        return blocked
     import pyautogui
 
     win = _find_win(title_re) if title_re else None
@@ -528,6 +540,9 @@ def ui_send_keys(keys: str, title_re: str = "") -> str:
               Пример: "Hello{ENTER}", "Ctrl+C", "Alt+F4".
         title_re: Заголовок целевого окна (если пусто — текущее активное окно).
     """
+    blocked = _guard("ui_send_keys", {"keys": keys, "title_re": title_re})
+    if blocked:
+        return blocked
     try:
         before = _snapshot(title_re)
 
@@ -559,6 +574,9 @@ def ui_type_text(text: str, title_re: str = "", interval: float = 0.0) -> str:
         title_re: Заголовок целевого окна.
         interval: Задержка между символами в секундах (по умолчанию 0).
     """
+    blocked = _guard("ui_type_text", {"text": text, "title_re": title_re, "interval": interval})
+    if blocked:
+        return blocked
     try:
         before = _snapshot(title_re)
 
@@ -653,6 +671,9 @@ def ui_close_window(title_re: str) -> str:
     Args:
         title_re: Заголовок окна (регулярное выражение).
     """
+    blocked = _guard("ui_close_window", {"title_re": title_re})
+    if blocked:
+        return blocked
     try:
         win = _find_win(title_re)
         if win is None:
@@ -768,6 +789,9 @@ def ui_clipboard_set(text: str) -> str:
     Args:
         text: Текст для помещения в буфер.
     """
+    blocked = _guard("ui_clipboard_set", {"text": text})
+    if blocked:
+        return blocked
     try:
         import win32clipboard
         win32clipboard.OpenClipboard()
@@ -1001,6 +1025,11 @@ def ui_click_by_index(index: int, title_re: str = "", element_type: str = "",
                       Если пусто — используется полный список интерактивных.
         double: Двойной клик (по умолчанию False).
     """
+    blocked = _guard("ui_click_by_index", {
+        "index": index, "title_re": title_re, "element_type": element_type, "double": double
+    })
+    if blocked:
+        return blocked
     import pyautogui
 
     try:

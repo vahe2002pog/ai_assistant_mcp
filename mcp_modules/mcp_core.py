@@ -14,6 +14,9 @@ from fastmcp import FastMCP
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import KNOWN_FOLDERS, env_map
+from ui_automation.logging_config import setup_error_logging
+
+setup_error_logging()
 
 # Настройка логов для отладки в консоли сервера
 logging.basicConfig(level=logging.INFO)

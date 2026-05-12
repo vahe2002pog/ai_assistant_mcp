@@ -21,7 +21,13 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from .mcp_core import mcp, logger, get_system_path
+from ui_automation.safety import blocked_message, check_tool_call
 from database import cache_put, cache_get, cache_list, history_push, history_pop, history_get_last, history_remove_last
+
+
+def _guard(name: str, args: dict) -> str:
+    decision = check_tool_call(name, args)
+    return "" if decision.allowed else blocked_message(decision.reason)
 
 
 @mcp.tool
@@ -374,6 +380,9 @@ def create_item(directory: str, name: str, is_folder: bool = False) -> str:
         - Папки создаются пустыми
         - ID можно использовать в других функциях (read_file, delete_item и т.д.)
     """
+    blocked = _guard("create_item", {"directory": directory, "name": name, "is_folder": is_folder})
+    if blocked:
+        return blocked
     path = get_system_path(directory)
     if not path or not os.path.exists(path):
         return f"Целевая директория '{directory}' не найдена."
@@ -427,6 +436,9 @@ def rename_item(file_id: int, new_name: str) -> str:
         - Расширение файла должно быть указано в new_name для файлов
         - ID в кэше изменяется после переименования
     """
+    blocked = _guard("rename_item", {"file_id": file_id, "new_name": new_name})
+    if blocked:
+        return blocked
     old_path = cache_get(file_id)
     if not old_path or not os.path.exists(old_path):
         return f"Элемент с id={file_id} не найден."
@@ -476,6 +488,9 @@ def copy_item(file_id: int, destination_folder: str) -> str:
         - Если имя занято, файл будет переименован в 'name_копия.ext'
         - Копия добавляется в кэш для последующего использования
     """
+    blocked = _guard("copy_item", {"file_id": file_id, "destination_folder": destination_folder})
+    if blocked:
+        return blocked
     source_path = cache_get(file_id)
     if not source_path or not os.path.exists(source_path):
         return f"Исходный элемент с id={file_id} не найден."
@@ -523,6 +538,9 @@ def move_file(file_id: int, destination_folder: str) -> str:
         - Использует кэш для получения пути к исходному файлу.
         - Если файл не найден в кэше, возвращает сообщение об ошибке.
     """
+    blocked = _guard("move_file", {"file_id": file_id, "destination_folder": destination_folder})
+    if blocked:
+        return blocked
     source_path = cache_get(file_id)
     if not source_path:
         return "Файл не найден в кеше"
@@ -617,6 +635,9 @@ def edit_file(file_id: int, content: str, mode: str = "append") -> str:
     Returns:
         str: Результат операции.
     """
+    blocked = _guard("edit_file", {"file_id": file_id, "content": content, "mode": mode})
+    if blocked:
+        return blocked
     path = cache_get(file_id)
     if not path or not os.path.exists(path):
         return f"Файл с id={file_id} не найден."
@@ -730,6 +751,9 @@ def delete_item(file_id: int) -> str:
     Returns:
         str: Сообщение об успешном перемещении в Корзину или описание ошибки.
     """
+    blocked = _guard("delete_item", {"file_id": file_id})
+    if blocked:
+        return blocked
     path = cache_get(file_id)
     if not path or not os.path.exists(path):
         return f"Элемент с id={file_id} не найден."
@@ -763,6 +787,9 @@ def undo_last_action() -> str:
     Returns:
         str: Сообщение об успешно отмене или описание ошибки.
     """
+    blocked = _guard("undo_last_action", {})
+    if blocked:
+        return blocked
     action = history_get_last()
     if not action:
         return "В базе данных нет истории действий для отмены."

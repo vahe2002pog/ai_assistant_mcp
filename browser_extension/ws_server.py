@@ -130,7 +130,11 @@ def _run_thread():
     # На Windows явно используем SelectorEventLoop для websockets
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    _free_port(9009)
+    # Do not kill a process that already owns 9009 by default. The extension
+    # may already be connected to a standalone bridge; tools_browser can fall
+    # back to that bridge over HTTP instead of breaking a healthy connection.
+    if os.environ.get("MCP_BRIDGE_FREE_PORT") == "1":
+        _free_port(9009)
     loop = asyncio.new_event_loop()
     _loop = loop
     asyncio.set_event_loop(loop)
