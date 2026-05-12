@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -315,7 +316,12 @@ def _dispatch(message: str, conv_id: Optional[int] = None) -> dict:
         if windows_ctx:
             hint += f"[Открытые окна]\n{windows_ctx}\n"
         if rag_ctx:
-            hint += f"[Релевантный опыт]\n{rag_ctx}"
+            hint += (
+                "[Контекст из хранилища/RAG]\n"
+                "Используй этот блок только если пользователь явно спрашивает про сохранённые документы, память или хранилище. "
+                "Для актуальных фактов, сайтов, приложений, экрана и вложенных изображений не подменяй им основной способ выполнения.\n"
+                f"{rag_ctx}"
+            )
         # chat_ctx идёт ОТДЕЛЬНЫМ параметром — его должен видеть именно Planner,
         # а не только worker'ы (иначе планировщик не поймёт «продолжи», «ещё раз» и т.п.).
         result = _HOST.dispatch(message, context_hint=hint, conv_id=conv_id,
@@ -420,6 +426,61 @@ def _extract_doc_text(path: str, full: bool = False) -> str:
     full=True — без обрезки по _MAX_INLINE_PREVIEW (для сохранения в vault)."""
     ext = os.path.splitext(path)[1].lower()
     limit = float("inf") if full else _MAX_INLINE_PREVIEW
+
+    def _trim(text: str) -> str:
+        return text if full or len(text) <= _MAX_INLINE_PREVIEW else text[:_MAX_INLINE_PREVIEW + 1]
+
+    def _extract_word_via_com() -> str:
+        """Read Word formats that python-docx cannot handle, especially legacy .doc."""
+        try:
+            import pythoncom  # type: ignore
+            import win32com.client  # type: ignore
+        except Exception:
+            return ""
+
+        abs_path = os.path.abspath(path)
+        word = None
+        doc = None
+        initialized = False
+        quit_word = False
+        try:
+            pythoncom.CoInitialize()
+            initialized = True
+            try:
+                word = win32com.client.DispatchEx("Word.Application")
+                quit_word = True
+            except Exception:
+                word = win32com.client.Dispatch("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = 0
+            doc = word.Documents.Open(
+                abs_path,
+                ConfirmConversions=False,
+                ReadOnly=True,
+                AddToRecentFiles=False,
+                Visible=False,
+            )
+            text = doc.Content.Text or ""
+            return _trim(text.replace("\r", "\n"))
+        except Exception:
+            return ""
+        finally:
+            if doc is not None:
+                try:
+                    doc.Close(False)
+                except Exception:
+                    pass
+            if word is not None and quit_word:
+                try:
+                    word.Quit()
+                except Exception:
+                    pass
+            if initialized:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+
     try:
         if ext in _TEXT_EXTS:
             for enc in ("utf-8", "cp1251", "latin-1"):
@@ -467,9 +528,18 @@ def _extract_doc_text(path: str, full: bool = False) -> str:
             try:
                 from docx import Document  # type: ignore
             except Exception:
-                return ""
+                return _extract_word_via_com()
             doc = Document(path)
-            return "\n".join(p.text for p in doc.paragraphs)
+            parts = [p.text for p in doc.paragraphs if p.text]
+            for table in doc.tables:
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    if any(cells):
+                        parts.append("\t".join(cells))
+            text = "\n".join(parts)
+            return _trim(text) if text.strip() else _extract_word_via_com()
+        if ext == ".doc":
+            return _extract_word_via_com()
         if ext == ".xlsx":
             try:
                 from openpyxl import load_workbook  # type: ignore
@@ -520,11 +590,13 @@ def _save_attachment(data_url_or_b64: str, filename_hint: str = "") -> Optional[
     except Exception:
         return None
     ext = {v: k for k, v in _MIME_BY_EXT.items()}.get(mime, ".png")
-    name = f"{uuid.uuid4().hex}{ext}"
+    sha = hashlib.sha256(raw).hexdigest()
+    name = f"{sha[:32]}{ext}"
     path = os.path.join(_ATTACH_DIR, name)
-    with open(path, "wb") as f:
-        f.write(raw)
-    return {"url": f"/attachments/{name}", "name": filename_hint or name, "mime": mime}
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(raw)
+    return {"url": f"/attachments/{name}", "name": filename_hint or name, "mime": mime, "sha256": sha}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -726,9 +798,14 @@ class Handler(BaseHTTPRequestHandler):
 
             attachments = []
             doc_attachments = []
+            seen_image_hashes = set()
             for img in images:
                 saved = _save_attachment(img)
                 if saved:
+                    img_hash = saved.get("sha256") or saved.get("url")
+                    if img_hash in seen_image_hashes:
+                        continue
+                    seen_image_hashes.add(img_hash)
                     attachments.append(saved)
             for d in documents:
                 if not isinstance(d, dict):

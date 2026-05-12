@@ -105,10 +105,13 @@ class Controller:
                 context_hint=context_hint,
             )
             if isinstance(next_item, DoneMarker):
-                trace.final_status = StepStatus.SUCCESS
+                trace.final_status = (
+                    StepStatus.SUCCESS if next_item.success else StepStatus.FAILURE
+                )
                 trace.final_summary = next_item.summary
                 utils.print_with_color(
-                    f"[Planner] DONE: {next_item.summary}", "green"
+                    f"[Planner] {'DONE' if next_item.success else 'FAILED'}: {next_item.summary}",
+                    "green" if next_item.success else "red",
                 )
                 break
 

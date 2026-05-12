@@ -44,6 +44,12 @@ if (quoteChipRm) {
 }
 let lastLocalMsgKey = null; // для подавления эха из SSE
 
+function addPendingImage(img) {
+  if (!img || !img.dataUrl) return;
+  if (pendingImages.some(x => x.dataUrl === img.dataUrl)) return;
+  pendingImages.push(img);
+}
+
 function isBusyConv(id) {
   if (id == null) return pendingNewSend != null;
   return inflightConvs.has(id);
@@ -548,7 +554,7 @@ fileInput.addEventListener("change", async (e) => {
       r.readAsDataURL(f);
     });
     if (f.type.startsWith("image/")) {
-      pendingImages.push({ dataUrl, name: f.name });
+      addPendingImage({ dataUrl, name: f.name });
     } else {
       if (f.size > MAX_DOC_SIZE) {
         alert(`Файл "${f.name}" больше 20 МБ и не будет прикреплён.`);
@@ -568,7 +574,7 @@ inputEl.addEventListener("paste", (e) => {
       const blob = it.getAsFile(); if (!blob) continue;
       const r = new FileReader();
       r.onload = () => {
-        pendingImages.push({ dataUrl: r.result, name: blob.name || "paste.png" });
+        addPendingImage({ dataUrl: r.result, name: blob.name || "paste.png" });
         renderAttachPreview();
       };
       r.readAsDataURL(blob);
@@ -859,16 +865,16 @@ async function refreshVisionModels() {
     const key = useCustom ? selVisionApiKey.value.trim() : selApiKey.value.trim();
     const d = await _fetchModels(base, key);
     const list = (d.models || []).map(_normModel);
-    // Только vision-модели.
-    const visionOnly = list.filter(x => x.vision);
-    if (!visionOnly.length) {
-      selVisionModel.innerHTML = `<option value="">(нет vision-моделей)</option>`;
+    // Не фильтруем список: некоторые провайдеры не отдают корректный vision-флаг,
+    // но модель всё равно может принимать изображения.
+    if (!list.length) {
+      selVisionModel.innerHTML = `<option value="">(не найдено)</option>`;
     } else {
       selVisionModel.innerHTML = `<option value="">(не выбрана — использовать основную)</option>`
-        + visionOnly.map(_renderOpt).join("");
+        + list.map(_renderOpt).join("");
     }
     if (currentCfg) {
-      const vids = visionOnly.map(x => x.id);
+      const vids = list.map(x => x.id);
       selVisionModel.value = vids.includes(currentCfg.vision_model) ? currentCfg.vision_model : "";
     }
   } catch (_) {

@@ -32,17 +32,17 @@ def _save_llm_cache(cache: dict) -> None:
 
 # Папки для сканирования ярлыков (.lnk)
 _SHORTCUT_DIRS = [
-    os.path.join(os.environ.get("APPDATA", ""), r"MicrosMicrosoft\Windows\Start Menu\Programs"),
-    os.path.join(os.environ.get("PROGRAMDATA", ""), r"MicrosMicrosoft\Windows\Start Menu\Programs"),
+    os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
+    os.path.join(os.environ.get("PROGRAMDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
     os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
     os.path.join(os.environ.get("PUBLIC", ""), "Desktop"),
 ]
 
 # Реестр: ключи с установленными программами
 _REG_KEYS = [
-    (winreg.HKEY_LOCAL_MACHINE, r"SMicrosoftWARE\MicrosMicrosoft\Windows\CurrentVersion\Uninstall"),
-    (winreg.HKEY_LOCAL_MACHINE, r"SMicrosoftWARE\WOW6432Node\MicrosMicrosoft\Windows\CurrentVersion\Uninstall"),
-    (winreg.HKEY_CURRENT_USER, r"SMicrosoftWARE\MicrosMicrosoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
 ]
 
 # Папки с .exe для прямого сканирования
@@ -381,10 +381,24 @@ def scan_and_save(llm: bool = True) -> int:
 
     if not all_apps:
         apps_clear()
+        _save_llm_cache({})
         return 0
 
     # Загружаем кэш LLM-алиасов (переживает пересканирование)
     llm_cache = _load_llm_cache()
+    current_by_norm = {
+        os.path.normpath(path).lower(): path
+        for _, path in all_apps.values()
+    }
+    pruned_llm_cache = {
+        current_by_norm[norm]: aliases
+        for path, aliases in llm_cache.items()
+        for norm in [os.path.normpath(path).lower()]
+        if norm in current_by_norm and aliases
+    }
+    if pruned_llm_cache != llm_cache or not os.path.exists(_LLM_CACHE_PATH):
+        _save_llm_cache(pruned_llm_cache)
+    llm_cache = pruned_llm_cache
 
     apps_clear()
     apps_put_many(list(all_apps.values()))
@@ -399,10 +413,9 @@ def scan_and_save(llm: bool = True) -> int:
         apps_add_aliases_bulk(alias_data)
 
     # Восстанавливаем LLM-алиасы из кэша
-    current_paths = {path for _, path in all_apps.values()}
     cached_data = [
         (path, aliases) for path, aliases in llm_cache.items()
-        if path in current_paths and aliases
+        if aliases
     ]
     if cached_data:
         apps_add_aliases_bulk(cached_data)

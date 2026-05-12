@@ -3,6 +3,7 @@ import functools
 import json
 import os
 import threading
+from pathlib import Path
 from typing import Optional, Any, Dict
 
 from colorama import Fore, Style, init
@@ -187,6 +188,11 @@ def get_hugginface_embedding(
             return cached
         _silence_st_logs()
         from langchain_huggingface import HuggingFaceEmbeddings
-        inst = HuggingFaceEmbeddings(model_name=model_name)
+        model_kwargs = {}
+        cache_root = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+        cache_name = "models--" + model_name.replace("/", "--")
+        if (cache_root / cache_name).exists():
+            model_kwargs["local_files_only"] = True
+        inst = HuggingFaceEmbeddings(model_name=model_name, model_kwargs=model_kwargs)
         _EMB_CACHE[model_name] = inst
         return inst

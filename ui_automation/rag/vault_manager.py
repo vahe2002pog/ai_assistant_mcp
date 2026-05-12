@@ -47,6 +47,12 @@ _STOPWORDS = {
 }
 
 
+class _SimpleDocument:
+    def __init__(self, page_content: str, metadata: dict):
+        self.page_content = page_content
+        self.metadata = metadata
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Утилиты
 # ─────────────────────────────────────────────────────────────────────────────
@@ -94,6 +100,28 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
         else:
             fm[key] = val.strip('"').strip("'")
     return fm, body
+
+
+def _fix_mojibake_text(text: str) -> str:
+    """Repairs UTF-8 text that was accidentally decoded as cp1251."""
+    if not text or "Р" not in text:
+        return text
+    try:
+        fixed = text.encode("cp1251").decode("utf-8")
+    except Exception:
+        return text
+    # Apply only when the repaired text is plausibly better.
+    return fixed if fixed.count("Р") + fixed.count("Ð") < text.count("Р") else text
+
+
+def _fix_mojibake_value(value):
+    if isinstance(value, str):
+        return _fix_mojibake_text(value)
+    if isinstance(value, list):
+        return [_fix_mojibake_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _fix_mojibake_value(v) for k, v in value.items()}
+    return value
 
 
 def _split_csv(s: str) -> Iterable[str]:
@@ -206,8 +234,10 @@ def _load_note(abs_path: str, rel_path: str) -> Optional[dict]:
     except OSError:
         return None
     fm, body = _parse_frontmatter(text)
+    fm = _fix_mojibake_value(fm)
+    body = _fix_mojibake_text(body)
     folder = rel_path.split("/", 1)[0] if "/" in rel_path else ""
-    name = fm.get("name") or os.path.splitext(os.path.basename(rel_path))[0]
+    name = fm.get("name") or _fix_mojibake_text(os.path.splitext(os.path.basename(rel_path))[0])
     return {
         "abs_path": abs_path,
         "rel_path": rel_path,
@@ -397,8 +427,82 @@ def search_grouped(query: str, k_per_folder: int = 2) -> dict:
     for folder in sorted(FOLDER_PRIORITY, key=lambda f: FOLDER_PRIORITY[f]):
         pairs = search_with_scores(query, k=max(k_per_folder * 4, k_per_folder), folder=folder)
         docs = _filter_scored_docs(query, pairs, limit=k_per_folder)
+        if not docs:
+            docs = _lexical_search_folder(query, folder, limit=k_per_folder)
         if docs:
             out[folder] = docs
+    return out
+
+
+def _simple_note_docs(note: dict) -> list:
+    fm = note["frontmatter"]
+    base_meta = {
+        "rel_path": note["rel_path"],
+        "folder": note["folder"],
+        "name": note["name"],
+        "tags": ",".join(fm.get("tags", []) if isinstance(fm.get("tags"), list) else []),
+        "triggers": " | ".join(fm.get("triggers", []) if isinstance(fm.get("triggers"), list) else []),
+    }
+    for key in ("date", "quality", "status", "source", "query"):
+        if key in fm:
+            base_meta[key] = fm.get(key)
+
+    if note["folder"] == "Experience":
+        if _low_value_experience_body(note["body"]):
+            return []
+        return [_SimpleDocument(f"[{note['name']} / опыт] {_compact_body(note['body'])}", base_meta)]
+
+    docs = []
+    if base_meta["triggers"]:
+        docs.append(_SimpleDocument(f"[{note['name']} - триггеры] {base_meta['triggers']}", base_meta))
+    for chunk in _chunk(note["body"], note["name"]):
+        docs.append(_SimpleDocument(chunk, base_meta))
+    return docs
+
+
+def _lexical_search_folder(query: str, folder: str, limit: int) -> list:
+    q_tokens = _tokens(query)
+    if not q_tokens or folder not in FOLDERS:
+        return []
+    folder_dir = os.path.join(VAULT_DIR, folder)
+    if not os.path.isdir(folder_dir):
+        return []
+
+    scored = []
+    for fn in os.listdir(folder_dir):
+        if not fn.lower().endswith(".md"):
+            continue
+        abs_p = os.path.join(folder_dir, fn)
+        rel_p = f"{folder}/{fn}"
+        note = _load_note(abs_p, rel_p)
+        if not note:
+            continue
+        haystack = " ".join([
+            note.get("name", ""),
+            rel_p,
+            str(note.get("frontmatter", {})),
+            note.get("body", ""),
+        ])
+        note_score = _lexical_overlap(query, haystack)
+        if note_score <= 0:
+            continue
+        for doc in _simple_note_docs(note):
+            doc_score = _lexical_overlap(query, doc.page_content + " " + rel_p)
+            doc.metadata["_score"] = float(-(doc_score or note_score))
+            scored.append((doc_score or note_score, os.path.getmtime(abs_p), doc))
+
+    scored.sort(key=lambda item: (-item[0], -item[1]))
+    out = []
+    seen = set()
+    for _score, _mtime, doc in scored:
+        rel = doc.metadata.get("rel_path", "")
+        key = (rel, (doc.page_content or "")[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(doc)
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -689,9 +793,30 @@ def delete_note(rel_path: str) -> bool:
 #  Форматирование для контекста LLM
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _excerpt_for_query(query: str, text: str, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    tokens = sorted(_tokens(query), key=len, reverse=True)
+    hit = -1
+    low = text.lower()
+    for token in tokens:
+        hit = low.find(token.lower())
+        if hit >= 0:
+            break
+    if hit < 0:
+        return text[:max_chars].rstrip() + "..."
+    start = max(0, hit - max_chars // 3)
+    end = min(len(text), start + max_chars)
+    start = max(0, end - max_chars)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return prefix + text[start:end].strip() + suffix
+
+
 def format_context(query: str, k_per_folder: int = 2, max_chars: int = 2200) -> str:
     """Собирает блок `[Релевантный опыт]` для вставки в подсказку агента."""
-    if len(_tokens(query)) < 2:
+    if not _tokens(query):
         return ""
     grouped = search_grouped(query, k_per_folder=k_per_folder)
     if not grouped:
@@ -717,9 +842,89 @@ def format_context(query: str, k_per_folder: int = 2, max_chars: int = 2200) -> 
             seen_rel.add(rel)
             score = doc.metadata.get("_score")
             score_part = f" score={score:.3f}" if isinstance(score, float) else ""
-            line = f"[{labels.get(folder, folder)} · {rel}{score_part}] {text}"
-            if total + len(line) > max_chars:
+            prefix = f"[{labels.get(folder, folder)} · {rel}{score_part}] "
+            remaining = max_chars - total - len(prefix)
+            if remaining <= 80:
                 return "\n".join(lines)
+            line = prefix + _excerpt_for_query(query, text, remaining)
             lines.append(line)
             total += len(line)
     return "\n".join(lines)
+
+
+# Late-bound overrides used by the search/excerpt functions above. They keep RAG
+# matching useful for inflected Russian queries without depending on a heavy
+# morphological analyzer.
+_RU_ENDINGS = (
+    "иями", "ями", "ами", "ого", "ему", "ому", "ыми", "ими",
+    "иях", "ах", "ях", "ией", "ью", "ия", "ие", "ый", "ий",
+    "ой", "ая", "ое", "ые", "ых", "им", "ым", "ом", "ем",
+    "ам", "ям", "ов", "ев", "а", "я", "ы", "и", "у", "ю", "е",
+)
+
+
+def _token_forms(token: str) -> set[str]:
+    forms = {token}
+    if len(token) < 5:
+        return forms
+    for ending in _RU_ENDINGS:
+        if token.endswith(ending) and len(token) - len(ending) >= 4:
+            forms.add(token[: -len(ending)])
+    return forms
+
+
+def _query_terms(query: str) -> list[tuple[str, set[str]]]:
+    return [(token, _token_forms(token)) for token in _tokens(query)]
+
+
+def _lexical_overlap(query: str, text: str) -> int:
+    terms = _query_terms(query)
+    if not terms:
+        return 0
+    text_forms: set[str] = set()
+    for token in _tokens(text):
+        text_forms.update(_token_forms(token))
+    return sum(1 for _token, forms in terms if forms & text_forms)
+
+
+def _excerpt_for_query(query: str, text: str, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if len(text) <= max_chars:
+        return text
+
+    terms = [(token, {form for form in forms if len(form) >= 4}) for token, forms in _query_terms(query)]
+    terms = [(token, forms) for token, forms in terms if forms]
+    low = text.lower()
+    candidates: list[int] = []
+    for _token, forms in terms:
+        for form in forms:
+            start = 0
+            while True:
+                pos = low.find(form, start)
+                if pos < 0:
+                    break
+                candidates.append(pos)
+                start = pos + max(1, len(form))
+
+    if not candidates:
+        return text[:max_chars].rstrip() + "..."
+
+    best_start = 0
+    best_score = -1
+    for pos in candidates:
+        start = max(0, pos - max_chars // 3)
+        end = min(len(text), start + max_chars)
+        start = max(0, end - max_chars)
+        window = low[start:end]
+        score = 0
+        for token, forms in terms:
+            if any(form in window for form in forms):
+                score += len(token)
+        if score > best_score or (score == best_score and abs(pos - (start + max_chars // 2)) < abs(pos - (best_start + max_chars // 2))):
+            best_score = score
+            best_start = start
+
+    end = min(len(text), best_start + max_chars)
+    prefix = "..." if best_start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return prefix + text[best_start:end].strip() + suffix

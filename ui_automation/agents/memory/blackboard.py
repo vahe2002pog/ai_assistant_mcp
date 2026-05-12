@@ -5,9 +5,10 @@ from typing import Dict, List, Optional, Union
 
 from ui_automation.agents.memory.memory import Memory, MemoryItem
 from ui_automation.automator.ui_control.screenshot import PhotographerFacade
-from ui_automation.config.config import Config
 
-configs = Config.get_instance().config_data
+USE_CUSTOMIZATION = os.getenv("USE_CUSTOMIZATION", "").lower() in ("1", "true", "yes")
+QA_PAIR_FILE = os.getenv("QA_PAIR_FILE", "")
+QA_PAIR_NUM = int(os.getenv("QA_PAIR_NUM", "-1"))
 
 
 @dataclass
@@ -44,10 +45,8 @@ class Blackboard:
         self._trajectories: Memory = Memory()
         self._screenshots: Memory = Memory()
 
-        if configs.get("USE_CUSTOMIZATION", False):
-            self.load_questions(
-                configs.get("QA_PAIR_FILE", ""), configs.get("QA_PAIR_NUM", -1)
-            )
+        if USE_CUSTOMIZATION:
+            self.load_questions(QA_PAIR_FILE, QA_PAIR_NUM)
 
     @property
     def questions(self) -> Memory:

@@ -160,32 +160,20 @@ def _build_tools() -> Tuple[Dict[str, Callable], List[Dict]]:
 
 def _ensure_apps_scanned() -> None:
     """
-    Проверяет базу приложений и при необходимости запускает сканирование.
-    - База пуста: сканирует синхронно без LLM, затем LLM-алиасы в фоне.
-    - База есть, есть приложения без LLM-алиасов: генерирует только их в фоне.
-    - База есть, все алиасы заполнены: ничего не делает.
+    Обновляет базу приложений при каждом запуске.
+    - Быстрый перескан без LLM выполняется синхронно.
+    - Удаленные приложения исчезают из БД и llm_aliases_cache.json.
+    - LLM-алиасы для новых приложений генерируются в фоне.
     """
     import threading
 
     try:
-        from database import apps_count
-        count = apps_count()
+        from app_scanner import scan_and_save
+        total = scan_and_save(llm=False)
+        print(f"База приложений обновлена: {total} записей")
     except Exception as e:
-        print(f"[Предупреждение] База приложений недоступна: {e}")
+        print(f"[Предупреждение] Ошибка сканирования приложений: {e}")
         return
-
-    if count == 0:
-        print("Первый запуск: сканирование установленных приложений…")
-        try:
-            from app_scanner import scan_and_save
-            total = scan_and_save(llm=False)
-            print(f"Найдено приложений: {total}")
-        except Exception as e:
-            print(f"[Предупреждение] Ошибка сканирования приложений: {e}")
-            return
-        threading.Thread(target=_bg_llm_aliases, daemon=True).start()
-    else:
-        print(f"База приложений: {count} записей")
 
     # Сканирование закладок браузеров (быстро, всегда обновляем)
     threading.Thread(target=_bg_scan_bookmarks, daemon=True).start()
@@ -233,11 +221,53 @@ def _bg_llm_bookmark_aliases() -> None:
 
 def _rag_retrieve(query: str, top_k: int = 3) -> str:
     """Собирает релевантный контекст из Obsidian-vault (Scenarios/Experience/Knowledge/Attachments)."""
+    if not _should_use_rag(query):
+        return ""
     try:
         from ui_automation.rag import vault_manager
         return vault_manager.format_context(query, k_per_folder=max(2, top_k - 1))
     except Exception:
         return ""
+
+
+def _should_use_rag(query: str) -> bool:
+    """Балансирует RAG: память подключаем только когда она действительно уместна."""
+    q = (query or "").lower()
+    if not q.strip():
+        return False
+
+    explicit_memory = any(s in q for s in (
+        "хранилищ", "vault", "rag", "памят", "сохран",
+        "из базы знаний", "в базе знаний", "из документа", "по документу",
+        "в документе", "из файла", "в файле", "прикрепленн",
+    ))
+    document_lookup = any(s in q for s in (
+        ".md", ".doc", ".docx", ".pdf", ".txt", ".xlsx", ".pptx",
+        "требован", "выдержк", "цитат", "фрагмент", "регламент", "вкр",
+    ))
+    if explicit_memory or document_lookup:
+        return True
+
+    operational = any(s in q for s in (
+        "открой", "запусти", "включи", "выключи", "нажми", "клик",
+        "введи", "напиши в", "закрой", "переключи", "создай файл",
+        "переименуй", "удали", "скопируй", "перемести",
+    ))
+    web_current = any(s in q for s in (
+        "найди", "поищи", "погугли", "в интернете", "сайт", "url", "http",
+        "сегодня", "сейчас", "актуальн", "последн", "новост", "цена",
+        "курс", "погода", "расписан", "рейтинг",
+    ))
+    vision = any(s in q for s in (
+        "изображен", "картинк", "фото", "скриншот", "на фото",
+        "на картинке", "посмотри на", "что изображено",
+    ))
+    if operational or web_current or vision:
+        return False
+
+    # Для обычной беседы/общих знаний RAG не подмешиваем: иначе старые заметки
+    # начинают звучать как источник истины там, где пользователь этого не просил.
+    return False
 
 
 def _match_scenario(query: str):
@@ -372,7 +402,12 @@ def run_chat(request: str = "") -> None:
         if windows_ctx:
             context_hint += f"[Открытые окна]\n{windows_ctx}\n"
         if rag_ctx:
-            context_hint += f"[Релевантный опыт]\n{rag_ctx}"
+            context_hint += (
+                "[Контекст из хранилища/RAG]\n"
+                "Используй этот блок только если пользователь явно спрашивает про сохранённые документы, память или хранилище. "
+                "Для актуальных фактов, сайтов, приложений, экрана и вложенных изображений не подменяй им основной способ выполнения.\n"
+                f"{rag_ctx}"
+            )
         result = host.dispatch(user_input, context_hint=context_hint)
         # result — AssistantResponse (или строка при ошибке форматтера)
         if hasattr(result, "voice"):

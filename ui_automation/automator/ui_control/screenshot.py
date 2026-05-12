@@ -1,5 +1,6 @@
 import base64
 import functools
+import json
 import mimetypes
 import os
 from abc import ABC, abstractmethod
@@ -11,14 +12,16 @@ from pywinauto.controls.uiawrapper import UIAWrapper
 from pywinauto.win32structures import RECT
 
 from ui_automation import utils
-from ui_automation.config.config import Config
 
-configs = Config.get_instance().config_data
+DEFAULT_PNG_COMPRESS_LEVEL = int(os.getenv("DEFAULT_PNG_COMPRESS_LEVEL", "0"))
+ANNOTATION_FONT_SIZE = int(os.getenv("ANNOTATION_FONT_SIZE", "25"))
 
-if configs is not None:
-    DEFAULT_PNG_COMPRESS_LEVEL = int(configs.get("DEFAULT_PNG_COMPRESS_LEVEL", 0))
-else:
-    DEFAULT_PNG_COMPRESS_LEVEL = 6
+try:
+    ANNOTATION_COLORS = json.loads(os.getenv("ANNOTATION_COLORS", "{}"))
+except json.JSONDecodeError:
+    ANNOTATION_COLORS = {}
+if not isinstance(ANNOTATION_COLORS, dict):
+    ANNOTATION_COLORS = {}
 
 
 class Photographer(ABC):
@@ -437,7 +440,7 @@ class AnnotationDecorator(PhotographerDecorator):
         window_rect = self.photographer.control.rectangle()
         screenshot_annotated = self.photographer.capture()
 
-        color_dict = configs.get("ANNOTATION_COLORS", {})
+        color_dict = ANNOTATION_COLORS
 
         for label_text, control in annotation_dict.items():
             control_rect = control.rectangle()
@@ -447,7 +450,7 @@ class AnnotationDecorator(PhotographerDecorator):
                 screenshot_annotated,
                 adjusted_coordinate,
                 label_text,
-                font_size=configs.get("ANNOTATION_FONT_SIZE", 25),
+                font_size=ANNOTATION_FONT_SIZE,
                 button_color=(
                     color_dict.get(
                         control.element_info.control_type, self.color_default

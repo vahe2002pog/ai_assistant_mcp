@@ -3,6 +3,7 @@ import sqlite3
 import time
 import json
 import base64
+import re
 from typing import Dict, Optional, Tuple
 
 try:
@@ -332,27 +333,81 @@ def apps_add_aliases_bulk(items: list) -> None:
         conn.close()
 
 
+_APP_SEARCH_STOPWORDS = {
+    "open", "launch", "start", "run", "play", "turn", "on", "app", "application",
+    "открой", "открыть", "запусти", "запустить", "включи", "включить",
+    "найди", "найти", "покажи", "показать", "приложение", "программу",
+    "программа", "плеер", "через", "для", "мне", "пожалуйста",
+}
+
+_APP_SEARCH_ENDINGS = (
+    "иями", "ями", "ами", "ого", "ему", "ому", "ыми", "ими",
+    "иях", "ах", "ях", "ией", "ью", "ия", "ие", "ый", "ий",
+    "ой", "ая", "ое", "ые", "ых", "им", "ым", "ом", "ем",
+    "ам", "ям", "ов", "ев", "а", "я", "ы", "и", "у", "ю", "е",
+)
+
+
+def _app_query_terms(query: str) -> list[str]:
+    raw = (query or "").lower().strip()
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(term: str) -> None:
+        term = term.strip().lower()
+        if len(term) < 2 or term in _APP_SEARCH_STOPWORDS or term in seen:
+            return
+        seen.add(term)
+        terms.append(term)
+
+    add(raw)
+    for token in re.findall(r"[a-zа-яё0-9_+.-]{2,}", raw, re.IGNORECASE):
+        add(token)
+        if re.search(r"[а-яё]", token, re.IGNORECASE) and len(token) >= 5:
+            for ending in _APP_SEARCH_ENDINGS:
+                if token.endswith(ending) and len(token) - len(ending) >= 4:
+                    add(token[: -len(ending)])
+                    break
+    return terms
+
+
 def apps_search(query: str) -> list:
     conn = _get_conn()
     try:
-        q = query.lower()
-        cur = conn.execute(
-            """
-            SELECT DISTINCT a.name, a.path FROM apps a
-            LEFT JOIN app_aliases al ON al.app_id = a.id
-            WHERE a.name LIKE ? OR al.alias LIKE ?
-            ORDER BY
-                CASE
-                    WHEN LOWER(a.name) = ? THEN 0
-                    WHEN al.alias = ? THEN 1
-                    WHEN LOWER(a.name) LIKE ? THEN 2
-                    ELSE 3
-                END
-            LIMIT 10
-            """,
-            (f"%{q}%", f"%{q}%", q, q, f"{q}%"),
-        )
-        return cur.fetchall()
+        terms = _app_query_terms(query)
+        if not terms:
+            return []
+        ranked: dict[str, tuple[int, str, str]] = {}
+        for idx, term in enumerate(terms):
+            cur = conn.execute(
+                """
+                SELECT DISTINCT a.name, a.path, al.alias FROM app_aliases al
+                INNER JOIN apps a ON a.id = al.app_id
+                WHERE al.alias = ? OR al.alias LIKE ?
+                ORDER BY
+                    CASE
+                        WHEN al.alias = ? THEN 0
+                        WHEN al.alias LIKE ? THEN 1
+                        ELSE 2
+                    END,
+                    LENGTH(al.alias)
+                LIMIT 10
+                """,
+                (term, f"%{term}%", term, f"{term}%"),
+            )
+            for name, path, alias in cur.fetchall():
+                alias_l = (alias or "").lower()
+                rank = idx * 10
+                if alias_l == term:
+                    rank += 0
+                elif alias_l.startswith(term):
+                    rank += 1
+                else:
+                    rank += 2
+                prev = ranked.get(path)
+                if prev is None or rank < prev[0]:
+                    ranked[path] = (rank, name, path)
+        return [(name, path) for _rank, name, path in sorted(ranked.values(), key=lambda x: (x[0], x[1].lower()))[:10]]
     finally:
         conn.close()
 

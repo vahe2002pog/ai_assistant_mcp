@@ -37,6 +37,9 @@ _WEB_SYSTEM_PROMPT = """/no_think
 - get_weather — погода для города.
 
 ПРАВИЛА:
+0. Если задача пришла как fallback после неудачи приложения (музыка/фото/видео/почта/карты и т.п.),
+   открой подходящий веб-сервис или официальный сайт. Для известных сервисов используй
+   канонический домен сразу, для неизвестных сначала ищи закладки/веб-поиск.
 1. Если пользователь просит ОТКРЫТЬ сайт/ссылку («открой ютуб», «зайди на
    википедию», «покажи github.com», «открой https://…»):
    а) если это известный/популярный сайт — сразу open_url с каноническим
@@ -273,7 +276,7 @@ class HostAgent:
         raw_for_formatter = final
         if step_texts:
             best = max(step_texts, key=len)
-            if len(best) > max(len(final) * 2, len(final) + 200):
+            if len(best) > max(len(final) + 40, int(len(final) * 1.25)):
                 raw_for_formatter = best
 
         from ui_automation.agents.agent.response_formatter import ResponseFormatter
@@ -293,19 +296,91 @@ class HostAgent:
         """Оборачивает существующие sub-agents (str→str) в Worker (StepSpec→StepResult)."""
         def _subtask_text(step: StepSpec, prev: str) -> str:
             text = step.parameters.get("task") or step.free_text or step.expected_outcome
-            if prev:
+            if prev and not step.parameters.get("ignore_prev_results"):
                 text = f"{text}\n\n[Результаты предыдущих шагов]\n{prev}"
-            if context_hint:
+            if context_hint and not step.parameters.get("ignore_context_hint"):
                 text = f"{text}\n\n{context_hint}"
             return text
 
         def _classify_error(msg: str) -> ErrorClass:
             low = msg.lower()
-            if any(k in low for k in ("timeout", "connection", "connectionreset", "temporarily")):
+            if any(k in low for k in (
+                "timeout", "timed out", "tls handshake", "connection",
+                "connectionreset", "temporarily", "502", "503", "504",
+                "bad gateway", "api connection", "llm unreachable",
+                "нет соединения", "соединения с моделью", "таймаут", "временно",
+            )):
                 return ErrorClass.TRANSIENT
-            if any(k in low for k in ("not found", "не найден", "missing")):
+            if any(k in low for k in (
+                "not found", "missing",
+                "не найден", "не найдена", "не найдено", "не найдены",
+                "не удалось", "ошибка",
+            )):
                 return ErrorClass.SEMANTIC
             return ErrorClass.UNKNOWN
+
+        def _looks_like_failed_agent_output(msg: str, agent_type_str: str) -> bool:
+            low = (msg or "").strip().lower()
+            if not low:
+                return False
+            if any(k in low for k in (
+                "ошибка llm", "ошибка: нет соединения", "нет соединения с моделью",
+                "error code: 502", "error code: 503", "error code: 504",
+                "tls handshake timeout", "api connection", "bad gateway",
+                "llm unreachable",
+            )):
+                return True
+            if agent_type_str != "system":
+                return False
+            return any(k in low for k in (
+                "ошибка",
+                "не найден", "не найдена", "не найдено", "не найдены",
+                "не удалось",
+                "failed", "not found", "missing",
+            ))
+
+        def _keyboard_sequence_worker(step: StepSpec, started: float) -> StepResult:
+            import time as _t
+
+            items_raw = step.parameters.get("items") or []
+            items = [str(item).strip() for item in items_raw if str(item).strip()]
+            submit_key = str(step.parameters.get("submit_key") or "{ENTER}")
+            title_re = str(step.parameters.get("title_re") or "")
+            if not items:
+                return StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILURE,
+                    error=ErrorInfo(
+                        error_class=ErrorClass.SEMANTIC,
+                        message="keyboard_sequence: empty item list",
+                    ),
+                    started_at=started,
+                    finished_at=_t.time(),
+                )
+
+            from mcp_modules.tools_uiautomation import ui_send_keys
+
+            keys = "".join(f"{item}{submit_key}" for item in items)
+            out = ui_send_keys(keys=keys, title_re=title_re)
+            if "Ошибка" in out or "не найден" in out:
+                return StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILURE,
+                    error=ErrorInfo(
+                        error_class=_classify_error(out),
+                        message=out,
+                    ),
+                    summary=out,
+                    started_at=started,
+                    finished_at=_t.time(),
+                )
+            return StepResult(
+                step_id=step.step_id,
+                status=StepStatus.SUCCESS,
+                summary=f"Введено строк: {len(items)}. Enter отправлен после каждой строки.",
+                started_at=started,
+                finished_at=_t.time(),
+            )
 
         def _legacy_worker(agent_type_str: str) -> Worker:
             def run(step: StepSpec, prev: str) -> StepResult:
@@ -313,6 +388,9 @@ class HostAgent:
                 started = _t.time()
                 subtask = _subtask_text(step, prev)
                 try:
+                    if (agent_type_str == "system"
+                            and step.action_type == "keyboard_sequence"):
+                        return _keyboard_sequence_worker(step, started)
                     if agent_type_str == "chat":
                         out = self._run_chat(subtask)
                     else:
@@ -320,10 +398,23 @@ class HostAgent:
                         self.appagent_dict[sub.name] = sub
                         self._active_appagent = sub
                         out = sub.execute(subtask)
+                    out_text = str(out or "").strip()
+                    if _looks_like_failed_agent_output(out_text, agent_type_str):
+                        return StepResult(
+                            step_id=step.step_id,
+                            status=StepStatus.FAILURE,
+                            error=ErrorInfo(
+                                error_class=_classify_error(out_text),
+                                message=out_text,
+                            ),
+                            summary=out_text,
+                            started_at=started,
+                            finished_at=_t.time(),
+                        )
                     return StepResult(
                         step_id=step.step_id,
                         status=StepStatus.SUCCESS,
-                        summary=str(out or "").strip(),
+                        summary=out_text,
                         started_at=started,
                         finished_at=_t.time(),
                     )

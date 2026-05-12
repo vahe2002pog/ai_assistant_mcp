@@ -35,7 +35,6 @@
   const scnForm = document.getElementById("scn-form");
   const scnName = document.getElementById("scn-name");
   const scnTriggers = document.getElementById("scn-triggers");
-  const scnTags = document.getElementById("scn-tags");
   const scnBody = document.getElementById("scn-body");
   const scnStatus = document.getElementById("scn-status");
   const scnNew = document.getElementById("scn-new");
@@ -46,7 +45,6 @@
     currentScn = null;
     scnName.value = "";
     scnTriggers.value = "";
-    scnTags.value = "scenario";
     scnBody.value = "";
     scnDelete.classList.add("hidden");
     scnStatus.textContent = "";
@@ -94,7 +92,6 @@
       scnName.value = n.name || "";
       const fm = n.frontmatter || {};
       scnTriggers.value = Array.isArray(fm.triggers) ? fm.triggers.join(", ") : "";
-      scnTags.value = Array.isArray(fm.tags) ? fm.tags.join(", ") : "scenario";
       scnBody.value = n.body || "";
       scnDelete.classList.remove("hidden");
       scnStatus.textContent = "";
@@ -113,7 +110,7 @@
     const body = scnBody.value.trim();
     if (!name || !body) return;
     const triggers = scnTriggers.value.split(",").map((s) => s.trim()).filter(Boolean);
-    const tags = scnTags.value.split(",").map((s) => s.trim()).filter(Boolean);
+    const tags = ["scenario"];
     scnStatus.textContent = "Сохраняю…";
     try {
       const r = await fetch("/api/vault/scenarios", {

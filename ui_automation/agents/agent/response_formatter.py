@@ -209,7 +209,10 @@ class ResponseFormatter:
             # лучше отдать полный raw, чем потерять данные.
             if finish == "length":
                 return self._fallback(raw)
-            return self._parse(content.strip(), raw)
+            parsed = self._parse(content.strip(), raw)
+            if self._lost_substance(raw, parsed):
+                return self._fallback(raw)
+            return parsed
         except Exception as e:
             print(f"[ResponseFormatter] LLM call failed: {e!r}", flush=True)
             return self._fallback(raw)
@@ -246,6 +249,41 @@ class ResponseFormatter:
 
         return AssistantResponse(voice=voice, screen=ScreenData(blocks=blocks),
                                  used_sources=used)
+
+    @staticmethod
+    def _response_text(response: AssistantResponse) -> str:
+        parts = [response.voice or ""]
+        for block in response.screen.blocks:
+            if isinstance(block, TextBlock):
+                parts.append(block.text)
+            elif isinstance(block, ListBlock):
+                parts.extend(block.items)
+            elif isinstance(block, TableBlock):
+                for row in block.rows:
+                    parts.extend(str(v) for v in row.values())
+            elif isinstance(block, LinksBlock):
+                parts.extend(block.links)
+            elif isinstance(block, FilesBlock):
+                parts.extend(block.file_paths)
+        return "\n".join(parts)
+
+    @classmethod
+    def _lost_substance(cls, raw: str, response: AssistantResponse) -> bool:
+        raw_clean = re.sub(r"\s+", " ", raw or "").strip()
+        if len(raw_clean) < 180:
+            return False
+        out_clean = re.sub(r"\s+", " ", cls._response_text(response)).strip()
+        if len(out_clean) >= len(raw_clean) * 0.55:
+            return False
+        factual_tokens = re.findall(
+            r"\b\d{2,4}\b|https?://\S+|[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{3,}",
+            raw_clean,
+        )
+        if len(factual_tokens) < 4:
+            return False
+        out_low = out_clean.lower()
+        kept = sum(1 for token in set(factual_tokens) if token.lower().strip(".,;:") in out_low)
+        return kept <= max(2, min(6, len(set(factual_tokens)) // 3))
 
     def _parse_block(self, b: Dict) -> Optional[Block]:
         """Преобразует словарь блока в типизированный объект."""
