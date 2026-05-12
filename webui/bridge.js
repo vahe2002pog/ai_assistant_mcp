@@ -19,7 +19,10 @@
       return;
     }
 
-    ws.onopen = () => console.log("[AppBridge] Connected");
+    ws.onopen = () => {
+      console.log("[AppBridge] Connected");
+      try { ws.send(JSON.stringify({ type: "hello", client: "app" })); } catch {}
+    };
 
     ws.onmessage = async (event) => {
       let msg;

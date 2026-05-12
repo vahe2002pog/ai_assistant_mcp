@@ -543,11 +543,15 @@ def _filter_scored_docs(
     return out
 
 
+def _normalize_trigger_match_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).casefold()
+
+
 def match_scenario_by_trigger(query: str) -> Optional[dict]:
-    """Точный матч по фразам-триггерам (case-insensitive substring).
+    """Exact match by scenario trigger after trimming whitespace, case-insensitive.
     Возвращает загруженную заметку или None.
     """
-    q = query.strip().lower()
+    q = _normalize_trigger_match_text(query)
     if not q:
         return None
     scen_dir = os.path.join(VAULT_DIR, "Scenarios")
@@ -565,8 +569,8 @@ def match_scenario_by_trigger(query: str) -> Optional[dict]:
         if not isinstance(triggers, list):
             continue
         for t in triggers:
-            t_norm = str(t).strip().lower()
-            if t_norm and t_norm in q:
+            t_norm = _normalize_trigger_match_text(str(t))
+            if t_norm and t_norm == q:
                 return n
     return None
 

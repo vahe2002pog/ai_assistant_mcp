@@ -12,6 +12,8 @@ import uuid
 import websockets
 
 _extension_ws = None
+_clients: dict[str, set] = {"extension": set(), "app": set(), "unknown": set()}
+_client_kind: dict = {}
 _pending: dict = {}           # id -> concurrent.futures.Future
 _loop: asyncio.AbstractEventLoop = None
 _thread: threading.Thread | None = None
@@ -23,15 +25,51 @@ def _log(msg):
     print(msg, flush=True, file=sys.stderr)
 
 
-async def _handler(websocket):
+def _register_client(websocket, kind: str) -> None:
     global _extension_ws
-    _extension_ws = websocket
-    _log("[Bridge] Chrome extension connected")
-    print("[Bridge] Chrome extension connected", flush=True, file=sys.stderr)
+    kind = kind if kind in _clients else "unknown"
+    old_kind = _client_kind.get(websocket)
+    if old_kind in _clients:
+        _clients[old_kind].discard(websocket)
+    _client_kind[websocket] = kind
+    _clients[kind].add(websocket)
+    _extension_ws = _pick_browser_client()
+
+
+def _unregister_client(websocket) -> None:
+    global _extension_ws
+    kind = _client_kind.pop(websocket, None)
+    if kind in _clients:
+        _clients[kind].discard(websocket)
+    if _extension_ws is websocket:
+        _extension_ws = _pick_browser_client()
+
+
+def _pick_browser_client():
+    if _clients["extension"]:
+        return next(iter(_clients["extension"]))
+    if _clients["unknown"] and not _clients["app"]:
+        return next(iter(_clients["unknown"]))
+    return None
+
+
+def connected_kinds() -> set[str]:
+    return {kind for kind, clients in _clients.items() if clients}
+
+
+async def _handler(websocket):
+    _register_client(websocket, "unknown")
+    _log("[Bridge] Client connected")
+    print("[Bridge] Client connected", flush=True, file=sys.stderr)
     try:
         async for message in websocket:
             try:
                 data = json.loads(message)
+                if data.get("type") == "hello":
+                    kind = str(data.get("client") or "unknown").lower()
+                    _register_client(websocket, kind)
+                    _log(f"[Bridge] Client identified as {kind}")
+                    continue
                 if data.get("type") == "pong":
                     continue
                 req_id = data.get("id")
@@ -44,9 +82,10 @@ async def _handler(websocket):
                 _log(f"[Bridge] Handler error: {e}")
                 print(f"[Bridge] Handler error: {e}", flush=True, file=sys.stderr)
     finally:
-        _extension_ws = None
-        _log("[Bridge] Chrome extension disconnected")
-        print("[Bridge] Chrome extension disconnected", flush=True, file=sys.stderr)
+        kind = _client_kind.get(websocket, "unknown")
+        _unregister_client(websocket)
+        _log(f"[Bridge] Client disconnected ({kind})")
+        print(f"[Bridge] Client disconnected ({kind})", flush=True, file=sys.stderr)
 
 
 async def _serve():
@@ -128,14 +167,21 @@ def start_thread():
 async def send_command(command: str, params: dict = None, timeout: float = 15.0):
     """Отправить команду расширению и дождаться ответа (thread-safe)."""
     # Ждём подключения расширения до 10 секунд
-    if _extension_ws is None:
+    browser_ws = _pick_browser_client()
+    if browser_ws is None:
         _log(f"[Bridge] Waiting for extension to connect (command={command})...")
         loop = asyncio.get_event_loop()
         for _ in range(20):
-            if _extension_ws is not None:
+            browser_ws = _pick_browser_client()
+            if browser_ws is not None:
                 break
             await loop.run_in_executor(None, lambda: __import__('time').sleep(0.5))
-        if _extension_ws is None or _loop is None:
+        if browser_ws is None or _loop is None:
+            if connected_kinds() == {"app"}:
+                raise RuntimeError(
+                    "Chrome extension not connected. Connected client is the Compass app bridge (--app), "
+                    "which cannot access tabs in a separate Chrome window."
+                )
             raise RuntimeError(
                 "Chrome extension not connected. Open Chrome and make sure the extension is active."
             )
@@ -148,7 +194,7 @@ async def send_command(command: str, params: dict = None, timeout: float = 15.0)
 
     # Отправляем из потока WS сервера
     asyncio.run_coroutine_threadsafe(
-        _extension_ws.send(json.dumps({
+        browser_ws.send(json.dumps({
             "id": req_id,
             "command": command,
             "params": params or {}

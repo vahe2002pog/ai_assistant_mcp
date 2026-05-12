@@ -38,7 +38,15 @@ async def _send(command: str, params: dict = None, timeout: float = 15.0) -> dic
     return await loop.run_in_executor(None, lambda: _send_sync(command, params, timeout))
 
 
-def _not_connected_msg() -> str:
+def _not_connected_msg(error: str = "") -> str:
+    if "compass app bridge" in (error or "").lower():
+        return (
+            "Не удалось получить доступ к вкладке браузера: подключен мост приложения "
+            "«Компас» в режиме --app, а не Chrome-расширение. Этот мост видит только "
+            "окно Компаса и не может управлять отдельными окнами Chrome.\n"
+            "Открой Chrome с загруженным browser_extension/extension и убедись, что "
+            "значок расширения показывает 'ON'."
+        )
     return (
         "Браузерное расширение не подключено.\n"
         "1. Запусти браузер\n"
@@ -55,7 +63,7 @@ async def browser_get_state() -> str:
     state = await _send("get_state")
     if "error" in state:
         if "not connected" in state["error"].lower():
-            return _not_connected_msg()
+            return _not_connected_msg(state["error"])
         return f"Ошибка: {state['error']}"
 
     lines = [
@@ -89,7 +97,7 @@ async def browser_navigate(url: str) -> str:
     result = await _send("navigate", {"url": url})
     if "error" in result:
         if "not connected" in result["error"].lower():
-            return _not_connected_msg()
+            return _not_connected_msg(result["error"])
         return f"Ошибка: {result['error']}"
     return f"Открыта страница: {url}"
 

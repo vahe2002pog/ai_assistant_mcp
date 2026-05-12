@@ -9,6 +9,7 @@ function connect() {
 
   ws.onopen = () => {
     console.log("[Bridge] Connected to MCP server");
+    try { ws.send(JSON.stringify({ type: "hello", client: "extension" })); } catch {}
     updateIcon(true);
     startKeepAlive();
   };
