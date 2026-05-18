@@ -34,7 +34,7 @@ DEACTIVATION_AUDIO = os.path.join(ROOT, "src", "audio", "deactivation.MP3")
 
 DEFAULT_SAMPLE_RATE = 16000
 VOICE_PORT = int(os.environ.get("COMPASS_VOICE_PORT") or "8766")
-VOICE_DAEMON_API_VERSION = 20
+VOICE_DAEMON_API_VERSION = 31
 WAKE_WINDOW_SECONDS = 1.0
 WAKE_WINDOW_SAMPLES = int(DEFAULT_SAMPLE_RATE * WAKE_WINDOW_SECONDS)
 WAKE_STEP_MS = 250
@@ -43,12 +43,13 @@ WAKE_THRESHOLD = float(os.environ.get("COMPASS_WAKE_THRESHOLD") or "0.6")
 WAKE_COOLDOWN_SEC = float(os.environ.get("COMPASS_WAKE_COOLDOWN") or "1.5")
 VOICE_SESSION_IDLE_TIMEOUT = float(os.environ.get("COMPASS_VOICE_SESSION_IDLE_TIMEOUT") or "120")
 MIN_SPEECH_SECONDS = float(os.environ.get("COMPASS_MIN_SPEECH_SECONDS") or "0.65")
-VOICE_RMS_THRESHOLD = float(os.environ.get("COMPASS_VOICE_RMS_THRESHOLD") or "0.012")
-VOICE_NOISE_MULTIPLIER = float(os.environ.get("COMPASS_VOICE_NOISE_MULTIPLIER") or "3.2")
-VOICE_NOISE_MARGIN = float(os.environ.get("COMPASS_VOICE_NOISE_MARGIN") or "0.006")
-VOICE_START_BLOCKS = int(os.environ.get("COMPASS_VOICE_START_BLOCKS") or "3")
-VOICE_MIN_BAND_RATIO = float(os.environ.get("COMPASS_VOICE_MIN_BAND_RATIO") or "0.42")
-VOICE_MAX_ZCR = float(os.environ.get("COMPASS_VOICE_MAX_ZCR") or "0.32")
+VOICE_RMS_THRESHOLD = float(os.environ.get("COMPASS_VOICE_RMS_THRESHOLD") or "0.003")
+VOICE_NOISE_MULTIPLIER = float(os.environ.get("COMPASS_VOICE_NOISE_MULTIPLIER") or "2.0")
+VOICE_NOISE_MARGIN = float(os.environ.get("COMPASS_VOICE_NOISE_MARGIN") or "0.0015")
+VOICE_START_BLOCKS = int(os.environ.get("COMPASS_VOICE_START_BLOCKS") or "1")
+VOICE_MIN_BAND_RATIO = float(os.environ.get("COMPASS_VOICE_MIN_BAND_RATIO") or "0.18")
+VOICE_MAX_ZCR = float(os.environ.get("COMPASS_VOICE_MAX_ZCR") or "0.48")
+VOICE_INPUT_GAIN = float(os.environ.get("COMPASS_VOICE_INPUT_GAIN") or "8.0")
 
 EMPTY_TRANSCRIPT_PATTERNS = (
     "\u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u0441\u0443\u0431\u0442\u0438\u0442\u0440\u043e\u0432",
@@ -127,10 +128,12 @@ def _play_audio(path: str) -> None:
             winmm.mciSendStringW(cmd_close, None, 0, None)
 
 
-def _write_wav(path: str, samples, sample_rate: int) -> None:
+def _write_wav(path: str, samples, sample_rate: int, gain: float = 1.0) -> None:
     import numpy as np
 
     arr = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if gain and gain != 1.0:
+        arr = arr * float(gain)
     arr = np.clip(arr, -1.0, 1.0)
     pcm = (arr * 32767.0).astype(np.int16)
     with wave.open(path, "wb") as wf:
@@ -165,6 +168,8 @@ def _record_until_silence(stop_event: threading.Event, silence_s: float = 1.3,
         flat = block.reshape(-1)
         if not flat.size:
             return 0.0, 0.0, 1.0
+        if VOICE_INPUT_GAIN and VOICE_INPUT_GAIN != 1.0:
+            flat = np.clip(flat * float(VOICE_INPUT_GAIN), -1.0, 1.0)
         rms = float(np.sqrt(np.mean(np.square(flat))))
         if rms <= 1e-6:
             return rms, 0.0, 1.0
@@ -255,7 +260,7 @@ def _record_until_silence(stop_event: threading.Event, silence_s: float = 1.3,
     if voiced_blocks * block_seconds < MIN_SPEECH_SECONDS:
         return None, False
     path = _temp_audio_path(".wav")
-    _write_wav(path, np.concatenate(chunks, axis=0), sample_rate)
+    _write_wav(path, np.concatenate(chunks, axis=0), sample_rate, gain=VOICE_INPUT_GAIN)
     return path, True
 
 
@@ -765,20 +770,57 @@ class VoiceSessionPanel:
             return False
 
     def _apply_rounded_window_region(self, hwnd_arg, user32, wintypes) -> None:  # noqa: ANN001
-        if self._apply_managed_rounded_region():
-            return
+        self._apply_managed_rounded_region()
         try:
-            rect = wintypes.RECT()
             user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
             user32.GetWindowRect.restype = wintypes.BOOL
-            width = self.WIDTH
-            height = self.HEIGHT
-            if user32.GetWindowRect(hwnd_arg, ctypes.byref(rect)):
-                width = max(1, int(rect.right - rect.left))
-                height = max(1, int(rect.bottom - rect.top))
-            self._apply_win32_rounded_region(hwnd_arg, user32, wintypes, width, height)
+            handles = self._rounded_region_handles(hwnd_arg, user32, wintypes)
+            for handle in handles:
+                rect = wintypes.RECT()
+                width = self.WIDTH
+                height = self.HEIGHT
+                if user32.GetWindowRect(handle, ctypes.byref(rect)):
+                    width = max(1, int(rect.right - rect.left))
+                    height = max(1, int(rect.bottom - rect.top))
+                self._apply_win32_rounded_region(handle, user32, wintypes, width, height)
         except Exception:
             pass
+
+    def _rounded_region_handles(self, hwnd_arg, user32, wintypes) -> list:  # noqa: ANN001
+        handles = []
+        seen: set[int] = set()
+
+        def add(handle) -> None:  # noqa: ANN001
+            try:
+                value = int(handle.value if hasattr(handle, "value") else handle)
+            except Exception:
+                return
+            if not value or value in seen:
+                return
+            seen.add(value)
+            handles.append(wintypes.HWND(value))
+
+        add(hwnd_arg)
+        try:
+            ga_root = 2
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            add(user32.GetAncestor(hwnd_arg, ga_root))
+        except Exception:
+            pass
+        try:
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            current = hwnd_arg
+            for _ in range(6):
+                parent = user32.GetParent(current)
+                if not parent:
+                    break
+                add(parent)
+                current = parent
+        except Exception:
+            pass
+        return handles
 
     def _apply_win32_rounded_region(self, hwnd_arg, user32, wintypes, width: int, height: int) -> None:  # noqa: ANN001
         dpi_scale = max(width / max(1, self.WIDTH), height / max(1, self.HEIGHT), 1.0)
@@ -943,7 +985,7 @@ class VoiceSessionPanel:
                 root.withdraw()
         except Exception:
             pass
-        text = payload.get("reply") or payload.get("status_text") or payload.get("text")
+        text = payload.get("reply") or payload.get("text") or payload.get("status_text")
         if not text:
             text = self._state_text(str(payload.get("state") or "idle"))
         try:
@@ -1307,7 +1349,7 @@ class VoiceSessionPanel:
       stopButton.disabled = !["recording", "transcribing", "thinking", "speaking"].includes(state);
       text.textContent = data.reply
         ? data.reply
-        : (data.status_text || data.text || stateText(state));
+        : (data.text || data.status_text || stateText(state));
     }};
     document.getElementById("open-chat").addEventListener("click", () => request("/open-chat"));
     document.getElementById("stop").addEventListener("click", () => request("/session/stop"));
@@ -1866,7 +1908,7 @@ class VoiceService:
             self._session_closed = True
             self._session_active = False
             self._session_status = ""
-        if self.snapshot().get("state") in ("recording", "listening"):
+        if self.snapshot().get("state") in ("recording", "listening", "transcribing"):
             self._record_stop.set()
         self._panel_update(state="idle", session_active=False)
 
@@ -2077,9 +2119,13 @@ class VoiceService:
                 if manual:
                     self._manual_pending.clear()
                 _play_audio(ACTIVATION_AUDIO)
-                self._set_state("recording", "recording", manual=manual)
-                path, has_speech = _record_until_silence(self._record_stop)
-                _play_audio(DEACTIVATION_AUDIO)
+                self._set_state("listening", text="Слушаю...", manual=manual)
+                path, has_speech = _record_until_silence(
+                    self._record_stop,
+                    on_recording_start=lambda: self._set_state("recording", text="Слушаю...", manual=manual),
+                )
+                if has_speech:
+                    _play_audio(DEACTIVATION_AUDIO)
             if not has_speech or not path:
                 self._set_state(self._ready_state())
                 return
@@ -2107,6 +2153,9 @@ class VoiceService:
     def _handle_audio_path(self, path: str, conv_id) -> None:
         self._set_state("transcribing")
         text = _transcribe(path)
+        self._handle_transcript_text(text, conv_id)
+
+    def _handle_transcript_text(self, text: str, conv_id) -> None:
         with self._session_lock:
             self._session_text = text
             self._session_reply = ""

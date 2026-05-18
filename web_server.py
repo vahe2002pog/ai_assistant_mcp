@@ -40,7 +40,7 @@ _WEBUI_DIR = os.path.join(_ROOT, "webui")
 _ATTACH_DIR = os.path.join(_ROOT, "attachments")
 os.makedirs(_ATTACH_DIR, exist_ok=True)
 _APP_WINDOW = None
-VOICE_DAEMON_API_VERSION = 20
+VOICE_DAEMON_API_VERSION = 31
 
 from ui_automation.logging_config import setup_error_logging, log_error
 setup_error_logging()
