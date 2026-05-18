@@ -39,6 +39,8 @@ _ROOT = os.path.dirname(os.path.abspath(__file__))
 _WEBUI_DIR = os.path.join(_ROOT, "webui")
 _ATTACH_DIR = os.path.join(_ROOT, "attachments")
 os.makedirs(_ATTACH_DIR, exist_ok=True)
+_APP_WINDOW = None
+VOICE_DAEMON_API_VERSION = 20
 
 from ui_automation.logging_config import setup_error_logging, log_error
 setup_error_logging()
@@ -221,11 +223,20 @@ def install_stdout_tap() -> None:
 _HOST = None
 _HOST_LOCK = threading.Lock()
 _HOST_READY = threading.Event()
+_HOST_INIT_STARTED = False
 
 
 def _ensure_host_async() -> None:
+    global _HOST_INIT_STARTED
+    if _HOST_READY.is_set():
+        return
+    with _HOST_LOCK:
+        if _HOST_INIT_STARTED:
+            return
+        _HOST_INIT_STARTED = True
+
     def _worker():
-        global _HOST
+        global _HOST, _HOST_INIT_STARTED
         try:
             import main as _m
             _m._ensure_apps_scanned()
@@ -235,6 +246,8 @@ def _ensure_host_async() -> None:
             BROKER.publish("")
             _HOST_READY.set()
         except Exception as e:
+            with _HOST_LOCK:
+                _HOST_INIT_STARTED = False
             BROKER.publish(f"Ошибка инициализации: {e}")
             print(f"[web] init error: {e}", file=sys.__stderr__)
 
@@ -602,6 +615,141 @@ def _save_attachment(data_url_or_b64: str, filename_hint: str = "") -> Optional[
     return {"url": f"/attachments/{name}", "name": filename_hint or name, "mime": mime, "sha256": sha}
 
 
+def get_voice_conversation_id() -> int:
+    import database as _db
+
+    title = "Голосовой чат"
+    try:
+        for conv in _db.conv_list(limit=500):
+            if (conv.get("title") or "").strip().lower() == title.lower():
+                return int(conv["id"])
+    except Exception:
+        pass
+    conv_id = _db.conv_create(title=title)
+    BROKER.emit("conv_created", {"id": conv_id, "title": title, "source": "voice"})
+    return conv_id
+
+
+def _show_app_window() -> None:
+    window = _APP_WINDOW
+    if window is None:
+        return
+    try:
+        window.show()
+        window.restore()
+    except Exception:
+        pass
+
+
+def process_chat_request(req: dict, source: str = "ui") -> dict:
+    """Shared chat pipeline for HTTP UI and the voice daemon."""
+    if not isinstance(req, dict):
+        raise ValueError("invalid JSON")
+
+    _ensure_host_async()
+
+    import database as _db
+
+    message = (req.get("message") or "").strip()
+    conv_id = req.get("conversation_id")
+    images = req.get("images") or []
+    documents = req.get("documents") or []
+    if not message and not images and not documents:
+        raise ValueError("empty message")
+
+    if conv_id in ("", 0):
+        conv_id = None
+    if conv_id is not None:
+        try:
+            conv_id = int(conv_id)
+        except Exception:
+            conv_id = None
+    attachments = []
+    doc_attachments = []
+    seen_image_hashes = set()
+    for img in images:
+        saved = _save_attachment(img)
+        if saved:
+            img_hash = saved.get("sha256") or saved.get("url")
+            if img_hash in seen_image_hashes:
+                continue
+            seen_image_hashes.add(img_hash)
+            attachments.append(saved)
+    for d in documents:
+        if not isinstance(d, dict):
+            continue
+        saved = _save_document(d.get("dataUrl") or "", d.get("name") or "file")
+        if saved:
+            doc_attachments.append(saved)
+            attachments.append({
+                "url": saved["url"], "name": saved["name"],
+                "mime": saved["mime"], "kind": "doc",
+            })
+
+    if not conv_id:
+        title = message or ("Изображение" if images else ("Документ" if documents else "Голосовой запрос"))
+        conv_id = _db.conv_create(title=title)
+        BROKER.emit("conv_created", {"id": conv_id, "title": title, "source": source})
+
+    _db.msg_add(conv_id, "user", message, attachments=attachments or None)
+    BROKER.emit("msg_added", {
+        "conversation_id": conv_id,
+        "role": "user",
+        "content": message,
+        "attachments": attachments,
+        "source": source,
+    })
+
+    augmented = message
+    img_atts = [a for a in attachments if a.get("kind") != "doc"]
+    if img_atts:
+        paths = ", ".join(os.path.abspath(os.path.join(_ROOT, a["url"].lstrip("/"))) for a in img_atts)
+        augmented = (
+            augmented
+            + f"\n\n[User attached image files: {paths}. Use the vision agent to inspect these files. "
+            + "Do not open them in a viewer and do not take a screen screenshot.]"
+        ).strip()
+    if doc_attachments:
+        parts = ["\n\n[Attached documents]"]
+        for d in doc_attachments:
+            parts.append(f"- {d['name']} ({d['path']})")
+            preview = _extract_doc_text(d["path"])
+            if preview:
+                truncated = preview[:_MAX_INLINE_PREVIEW]
+                suffix = "\n...[text truncated; full file is available at the path above]" \
+                         if len(preview) > _MAX_INLINE_PREVIEW else ""
+                parts.append(
+                    f"--- begin {d['name']} ---\n"
+                    f"{truncated}{suffix}\n"
+                    f"--- end {d['name']} ---"
+                )
+        augmented = (augmented + "\n" + "\n".join(parts)).strip()
+
+    reply = _dispatch(augmented, conv_id=conv_id)
+    from ui_automation import cancel as _cancel
+    if _cancel.is_cancelled(f"conv:{conv_id}"):
+        _cancel.clear(f"conv:{conv_id}")
+        return {"cancelled": True, "conversation_id": conv_id}
+
+    voice = reply.get("voice", "")
+    _db.msg_add(conv_id, "assistant", voice, response_json=json.dumps(reply, ensure_ascii=False))
+    BROKER.emit("msg_added", {
+        "conversation_id": conv_id,
+        "role": "assistant",
+        "content": voice,
+        "response": reply,
+        "source": source,
+    })
+    BROKER.emit("conv_updated", {"id": conv_id, "source": source})
+
+    return {
+        "reply": voice,
+        "response": reply,
+        "conversation_id": conv_id,
+        "attachments": attachments,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # silence default logs
         return
@@ -744,6 +892,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"items": _db.conv_list()})
             return
 
+        if path == "/api/voice-conversation":
+            cid = get_voice_conversation_id()
+            self._send_json(200, {"id": cid, "title": "Голосовой чат"})
+            return
+
         if path.startswith("/api/conversations/") and path.endswith("/messages"):
             try:
                 cid = int(path.split("/")[3])
@@ -806,6 +959,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         import database as _db
+
+        if path == "/api/chat":
+            req = self._read_json()
+            if req is None:
+                self._send_json(400, {"error": "invalid JSON"}); return
+            try:
+                self._send_json(200, process_chat_request(req, source=req.get("source") or "ui"))
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+            except Exception as e:
+                log_error("api_chat", e)
+                self._send_json(500, {"error": str(e)})
+            return
 
         if path == "/api/chat":
             req = self._read_json()
@@ -944,6 +1110,20 @@ class Handler(BaseHTTPRequestHandler):
             _cancel.request_cancel(key)
             BROKER.emit("cancelled", {"conversation_id": cid})
             self._send_json(200, {"ok": True})
+            return
+
+        if path == "/api/open-voice-chat":
+            req = self._read_json() or {}
+            cid = req.get("conversation_id")
+            try:
+                cid = int(cid) if cid is not None else get_voice_conversation_id()
+            except Exception:
+                cid = get_voice_conversation_id()
+            BROKER.emit("open_conversation", {"id": cid, "source": "voice"})
+            _show_app_window()
+            self._send_json(200, {"ok": True, "id": cid})
+            return
+            self._send_json(200, {"ok": True, "id": cid, "title": "Голосовой чат"})
             return
 
         if path == "/api/vault/scenarios":
@@ -1140,12 +1320,141 @@ def _pick_port(preferred: int) -> int:
     return preferred  # will fail and show error
 
 
+def _voice_daemon_request(port: int, path: str, payload: Optional[dict] = None,
+                          timeout: float = 0.7) -> Optional[dict]:
+    try:
+        import urllib.request
+        url = f"http://127.0.0.1:{port}{path}"
+        data = None
+        headers = {}
+        method = "GET"
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json; charset=utf-8"
+            method = "POST"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return None
+
+
+def _stop_stale_voice_daemon(port: int) -> bool:
+    """Terminate only this app's old voice daemon process, never arbitrary python."""
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return False
+
+    stopped = False
+    main_path = os.path.abspath(os.path.join(_ROOT, "main.py")).lower()
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = [str(part) for part in (proc.info.get("cmdline") or [])]
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if not cmdline:
+            continue
+        lowered = [part.lower() for part in cmdline]
+        joined = " ".join(lowered)
+        if "--voice-daemon" not in lowered:
+            continue
+        if main_path not in {os.path.abspath(part).lower() for part in cmdline if part.lower().endswith("main.py")}:
+            if "main.py" not in joined:
+                continue
+        if "--voice-port" in lowered:
+            try:
+                idx = lowered.index("--voice-port")
+                if idx + 1 >= len(lowered) or int(lowered[idx + 1]) != int(port):
+                    continue
+            except Exception:
+                continue
+        elif int(port) != 8766:
+            continue
+        try:
+            proc.terminate()
+            stopped = True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    if stopped:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if _voice_daemon_request(port, "/health", timeout=0.2) is None:
+                return True
+            time.sleep(0.15)
+    return stopped
+
+
+def _stop_voice_daemon(port: int = 8766) -> None:
+    _voice_daemon_request(port, "/session/stop", {}, timeout=0.4)
+    _voice_daemon_request(port, "/wake/stop", {}, timeout=0.4)
+    _voice_daemon_request(port, "/shutdown", {}, timeout=0.4)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if _voice_daemon_request(port, "/health", timeout=0.2) is None:
+            return
+        time.sleep(0.15)
+    _stop_stale_voice_daemon(port)
+
+
+def _ensure_voice_daemon(chat_url: str, port: int = 8766) -> None:
+    if os.environ.get("COMPASS_NO_VOICE_DAEMON") == "1":
+        return
+    health = _voice_daemon_request(port, "/health")
+    if health is not None:
+        try:
+            daemon_version = int(health.get("api_version") or 0)
+        except Exception:
+            daemon_version = 0
+        if daemon_version < VOICE_DAEMON_API_VERSION:
+            print(f"[voice] restarting stale daemon on port {port} (api {daemon_version})")
+            _stop_stale_voice_daemon(port)
+            health = _voice_daemon_request(port, "/health")
+    if health is not None:
+        try:
+            from ui_automation import llm_config as _llm
+            ui_theme = (_llm.get().get("ui_theme") or "dark")
+        except Exception:
+            ui_theme = "dark"
+        _voice_daemon_request(port, "/config", {"chat_url": chat_url, "ui_theme": ui_theme}, timeout=0.7)
+        _voice_daemon_request(port, "/wake/start", {}, timeout=0.7)
+        return
+    try:
+        env = os.environ.copy()
+        try:
+            from ui_automation import llm_config as _llm
+            env["COMPASS_UI_THEME"] = (_llm.get().get("ui_theme") or "dark")
+        except Exception:
+            env["COMPASS_UI_THEME"] = "dark"
+        env["COMPASS_CHAT_URL"] = chat_url
+        env["COMPASS_VOICE_PORT"] = str(port)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        log_path = os.path.join(_ROOT, "voice", "voice-daemon.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        log_file = open(log_path, "ab", buffering=0)
+        subprocess.Popen(
+            [sys.executable, os.path.join(_ROOT, "main.py"),
+             "--voice-daemon", "--voice-wake", "--voice-port", str(port), "--chat-url", chat_url],
+            cwd=_ROOT,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            creationflags=flags,
+        )
+    except Exception as e:
+        print(f"[voice] daemon start failed: {e}", file=sys.__stderr__)
+
+
 def _start_server(port: int) -> tuple[ThreadingHTTPServer, str]:
     install_stdout_tap()
     _ensure_host_async()
     port = _pick_port(port)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
+    _ensure_voice_daemon(url)
     print(f"[web] Компас запущен: {url}")
     return httpd, url
 
@@ -1153,7 +1462,8 @@ def _start_server(port: int) -> tuple[ThreadingHTTPServer, str]:
 def run_web(port: int = 8765, open_window: bool = True, standalone: bool = True) -> None:
     httpd, url = _start_server(port)
     if open_window:
-        threading.Timer(0.4, lambda: _open_window(url, standalone)).start()
+        app_url = url + ("?bridge=1" if standalone else "")
+        threading.Timer(0.4, lambda: _open_window(app_url, standalone)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -1171,8 +1481,6 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
         import webview  # type: ignore
     except ImportError:
         print("[web] Нужен пакет pywebview. Установи: pip install pywebview")
-        print("[web] Откатываюсь на окно Edge --app.")
-        run_web(port=port, open_window=True, standalone=True)
         return
 
     # Для Windows: задать AppUserModelID и иконку процесса,
@@ -1201,6 +1509,7 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
 
     app_url = url + "?bridge=1"
     try:
+        global _APP_WINDOW
         window = webview.create_window(
             "Компас",
             app_url,
@@ -1209,6 +1518,7 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
             min_size=(520, 480),
             text_select=True,
         )
+        _APP_WINDOW = window
         icon_path = os.path.join(_ROOT, "src", "Icon_Compass.ico")
 
         state = {"exiting": False, "tray": None}
@@ -1251,6 +1561,10 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
 
         def _exit_app():
             state["exiting"] = True
+            try:
+                _stop_voice_daemon(8766)
+            except Exception as e:
+                print(f"[voice] daemon stop failed: {e}")
             try:
                 if state["tray"] is not None:
                     state["tray"].stop()
@@ -1306,13 +1620,9 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
             # старые версии pywebview без параметра icon
             webview.start()
     except Exception as e:
-        print(f"[web] Ошибка webview ({e}), откатываюсь на окно Edge --app.")
-        _open_window(url, standalone=True)
-        try:
-            server_thread.join()
-        except KeyboardInterrupt:
-            pass
+        print(f"[web] Ошибка webview ({e}).")
     finally:
+        _APP_WINDOW = None
         try:
             if 'state' in locals() and state.get("tray") is not None:
                 state["tray"].stop()
@@ -1326,8 +1636,12 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
         # (ws-мост, сканеры, HostAgent-воркеры), часть из них — не daemon,
         # и обычный return из run_web() оставляет процесс висеть в трее-невидимкой.
         if 'state' in locals() and state.get("exiting"):
+            try:
+                _stop_voice_daemon(8766)
+            except Exception:
+                pass
             os._exit(0)
 
 
 if __name__ == "__main__":
-    run_web()
+    run_app()

@@ -27,3 +27,6 @@ vba_corpus.json
 .env
 llm_config.json
 cc.bat
+voice/models/*
+voice/whisper/*
+voice/voice-daemon.log

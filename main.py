@@ -505,59 +505,44 @@ def list_tools() -> None:
 
 def _build_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Компас — умный персональный помощник для Windows"
+        description="Компас — десктопное приложение ассистента"
     )
-    p.add_argument("--request", "-r", default="",
-                   help="Разовый запрос (без интерактивного режима).")
-    p.add_argument("--mcp-only", action="store_true",
-                   help="Запустить только MCP сервер (stdio).")
-    p.add_argument("--gui", action="store_true",
-                   help="Запустить старый Tkinter-интерфейс (legacy).")
-    p.add_argument("--web", action="store_true",
-                   help="Запустить веб-интерфейс (локальный HTTP-сервер + окно Edge).")
-    p.add_argument("--app", action="store_true",
-                   help="Запустить как десктоп-приложение в окне pywebview (WebView2).")
+    p.add_argument("--app", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--port", type=int, default=8765,
-                   help="Порт веб-интерфейса (по умолчанию 8765).")
-    p.add_argument("--no-open", action="store_true",
-                   help="Не открывать окно/браузер автоматически (для --web).")
-    p.add_argument("--browser", action="store_true",
-                   help="Открыть веб-интерфейс в системном браузере, а не в окне Edge.")
-    p.add_argument("--list-tools", action="store_true",
-                   help="Показать список инструментов и выйти.")
-    p.add_argument("--no-bridge", action="store_true",
-                   help="Не запускать WebSocket мост браузерного расширения.")
+                   help="Внутренний порт desktop-приложения (по умолчанию 8765).")
+    p.add_argument("--voice-daemon", action="store_true",
+                   help=argparse.SUPPRESS)
+    p.add_argument("--voice-port", type=int, default=8766,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--chat-url", default="",
+                   help=argparse.SUPPRESS)
+    p.add_argument("--no-voice-overlay", action="store_true",
+                   help=argparse.SUPPRESS)
+    p.add_argument("--voice-wake", action="store_true",
+                   help=argparse.SUPPRESS)
+    p.add_argument("--voice-preload-tts", action="store_true",
+                   help="Заранее скачать/проверить модель Silero TTS и выйти.")
     return p.parse_args()
 
 
 def main() -> None:
     args = _build_args()
 
-    if args.list_tools:
-        list_tools()
+    if args.voice_preload_tts:
+        from voice.daemon import preload_tts_model
+        preload_tts_model()
+        print("Silero TTS model is cached.")
         return
 
-    if args.mcp_only:
-        run_mcp_server()
+    if args.voice_daemon:
+        from voice.daemon import run_daemon
+        run_daemon(port=args.voice_port, chat_url=args.chat_url,
+                   overlay=not args.no_voice_overlay,
+                   wake_enabled=args.voice_wake)
         return
 
-    if args.app:
-        from web_server import run_app
-        run_app(port=args.port)
-        return
-
-    if args.web:
-        from web_server import run_web
-        run_web(port=args.port, open_window=not args.no_open, standalone=not args.browser)
-        return
-
-    if args.gui:
-        from gui import run_gui
-        run_gui()
-        return
-
-    # По умолчанию — чат через HostAgent
-    run_chat(request=args.request)
+    from web_server import run_app
+    run_app(port=args.port)
 
 
 if __name__ == "__main__":

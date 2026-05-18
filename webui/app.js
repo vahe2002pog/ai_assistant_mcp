@@ -14,6 +14,7 @@ const attachBtn = $("#attach-btn");
 const fileInput = $("#file-input");
 const attachPreview = $("#attach-preview");
 const themeToggle = $("#theme-toggle");
+const voiceBtn = $("#voice-btn");
 
 let currentConvId = null;
 const inflightConvs = new Set();      // conv_id'шники с активным запросом
@@ -69,11 +70,17 @@ function applyTheme(theme, options = {}) {
   }
 }
 applyTheme(initialStoredTheme || "dark", { persist: false });
+
+function currentTheme() {
+  return document.documentElement.classList.contains("light") ? "light" : "dark";
+}
+
 if (themeToggle) {
   themeToggle.addEventListener("click", () => {
-    const next = document.documentElement.classList.contains("light") ? "dark" : "light";
+    const next = currentTheme() === "light" ? "dark" : "light";
     applyTheme(next);
     saveTheme(next);
+    voiceFetch("/config", { chat_url: location.origin, ui_theme: next }).catch(() => {});
   });
 }
 
@@ -142,6 +149,7 @@ function clearWelcome() {
 function showWelcome() {
   messagesEl.innerHTML = `
     <div class="welcome">
+      <img class="welcome-mark" src="/src/svg/orange/compass-orange-default.svg" alt="" />
       <h1>Чем могу помочь?</h1>
       <p>Открою приложение, найду файл, что-то в интернете или управлю браузером.</p>
     </div>`;
@@ -497,6 +505,7 @@ function connectEvents() {
     try {
       const { id } = JSON.parse(e.data);
       if (id === currentConvId) { currentConvId = null; showWelcome(); }
+      if (id === voiceConvId) voiceConvId = null;
       loadConversations();
     } catch (_) {}
   });
@@ -505,11 +514,21 @@ function connectEvents() {
       const cfg = JSON.parse(e.data);
       currentCfg = cfg;
       updatePill(cfg);
+      if (cfg.ui_theme && cfg.ui_theme !== currentTheme()) {
+        applyTheme(cfg.ui_theme, { persist: false });
+        voiceFetch("/config", { chat_url: location.origin, ui_theme: cfg.ui_theme }).catch(() => {});
+      }
       if (!settingsPanel.classList.contains("hidden")) {
         selProvider.value = cfg.provider;
         selBase.value = cfg.base_url;
         setSafetyToggle(cfg.safety_mode || "strict");
       }
+    } catch (_) {}
+  });
+  evtSource.addEventListener("open_conversation", (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.id != null) openConversation(d.id);
     } catch (_) {}
   });
   evtSource.addEventListener("msg_added", (e) => {
@@ -525,6 +544,18 @@ function connectEvents() {
         refreshSendBtn();
         applyStatus();
         loadConversations();
+      }
+      if (d.source === "voice" && d.conversation_id != null) {
+        voiceConvId = d.conversation_id;
+        if (!pendingNewSend && currentConvId == null) {
+          currentConvId = d.conversation_id;
+          loadConversations();
+        }
+        if (d.role === "user") {
+          markVoiceBusy(d.conversation_id, "Думаю...");
+        } else if (d.role === "assistant" && !VOICE_BUSY_STATES.has(voiceState)) {
+          clearVoiceBusy(d.conversation_id);
+        }
       }
       if (d.conversation_id !== currentConvId) return;
       const key = `${d.role}|${(d.content || "").slice(0, 80)}`;
@@ -743,6 +774,9 @@ async function send(text) {
 async function cancelRequest() {
   const id = currentConvId;
   const ctrl = id != null ? abortCtrls.get(id) : pendingNewSend?.ctrl;
+  if (id != null && id === voiceBusyConvId) {
+    try { await voiceFetch("/session/stop", {}); } catch (_) {}
+  }
   try {
     await fetch("/api/cancel", {
       method: "POST",
@@ -786,6 +820,290 @@ inputEl.addEventListener("keydown", (e) => {
 });
 
 // ── Настройки модели ───────────────────────────────────────────────────
+// Voice mode ---------------------------------------------------------------
+const VOICE_DAEMON_URL = "http://127.0.0.1:8766";
+let voiceSource = null;
+let voiceState = "unknown";
+let browserVoiceRecorder = null;
+let voiceConvId = null;
+let voiceBusyConvId = null;
+const VOICE_BUSY_STATES = new Set(["transcribing", "thinking", "speaking"]);
+
+function isDesktopVoiceMode() {
+  return new URLSearchParams(location.search).get("bridge") === "1" || !!window.pywebview;
+}
+
+async function voiceFetch(path, payload = null) {
+  const body = payload
+    ? { ui_theme: currentTheme(), ...payload }
+    : null;
+  const opts = body
+    ? {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    : {};
+  const r = await fetch(VOICE_DAEMON_URL + path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || data.ok === false) throw new Error(data.error || `voice daemon ${r.status}`);
+  return data;
+}
+
+async function ensureVoiceConversation({ open = false } = {}) {
+  if (voiceConvId != null) {
+    if (open && currentConvId !== voiceConvId) await openConversation(voiceConvId);
+    return voiceConvId;
+  }
+  const r = await fetch("/api/voice-conversation");
+  const d = await r.json();
+  voiceConvId = d.id;
+  if (open) await openConversation(voiceConvId);
+  return voiceConvId;
+}
+
+function setVoiceButtonState(state, detail = "") {
+  if (!voiceBtn) return;
+  voiceState = state || "unknown";
+  voiceBtn.classList.remove("recording", "transcribing", "thinking", "speaking", "error");
+  if (["recording", "transcribing", "thinking", "speaking", "error"].includes(voiceState)) {
+    voiceBtn.classList.add(voiceState);
+  }
+  const titles = {
+    wake_listening: "Voice ready",
+    idle: "Voice ready",
+    recording: "Listening...",
+    transcribing: "Transcribing...",
+    thinking: "Thinking...",
+    speaking: "Speaking...",
+    error: detail || "Voice error",
+    offline: "Voice daemon offline",
+  };
+  voiceBtn.title = titles[voiceState] || "Voice request";
+  voiceBtn.setAttribute("aria-label", voiceBtn.title);
+  voiceBtn.disabled = voiceState === "offline";
+}
+
+function voiceStatusLabel(state, data = {}) {
+  if (data.status_text) return data.status_text;
+  if (state === "transcribing") return "Распознаю голос...";
+  if (state === "thinking") return "Думаю...";
+  if (state === "speaking") return "Озвучиваю ответ...";
+  return "";
+}
+
+function markVoiceBusy(convId, status = "") {
+  if (convId == null) return;
+  voiceConvId = convId;
+  voiceBusyConvId = convId;
+  inflightConvs.add(convId);
+  if (status) setStatus(status);
+  refreshSendBtn();
+  applyStatus();
+}
+
+function clearVoiceBusy(convId = voiceBusyConvId) {
+  if (convId == null) return;
+  inflightConvs.delete(convId);
+  abortCtrls.delete(convId);
+  if (voiceBusyConvId === convId) voiceBusyConvId = null;
+  if (currentConvId === convId) setStatus("");
+  refreshSendBtn();
+  applyStatus();
+}
+
+function connectVoiceEvents() {
+  if (!voiceBtn) return;
+  try { if (voiceSource) voiceSource.close(); } catch (_) {}
+  try {
+    voiceSource = new EventSource(VOICE_DAEMON_URL + "/events");
+  } catch (_) {
+    setVoiceButtonState("offline");
+    return;
+  }
+  voiceSource.addEventListener("state", (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      setVoiceButtonState(d.state, d.detail || "");
+      if (d.conversation_id != null) {
+        voiceConvId = d.conversation_id;
+        if (VOICE_BUSY_STATES.has(d.state)) {
+          markVoiceBusy(d.conversation_id, voiceStatusLabel(d.state, d));
+        } else if (voiceBusyConvId === d.conversation_id && ["listening", "wake_listening", "idle", "error"].includes(d.state)) {
+          clearVoiceBusy(d.conversation_id);
+        }
+      }
+    } catch (_) {}
+  });
+  voiceSource.addEventListener("chat_done", (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.conversation_id != null) {
+        voiceConvId = d.conversation_id;
+        markVoiceBusy(d.conversation_id, d.reply ? "Озвучиваю ответ..." : "");
+      }
+      if (currentConvId == null && d.conversation_id != null) {
+        openConversation(d.conversation_id);
+      } else {
+        loadConversations();
+      }
+    } catch (_) {}
+  });
+  voiceSource.onerror = () => {
+    setVoiceButtonState("offline");
+    setTimeout(connectVoiceEvents, 2500);
+  };
+}
+
+function encodeWav(chunks, sampleRate) {
+  const length = chunks.reduce((n, c) => n + c.length, 0);
+  const data = new Float32Array(length);
+  let offset = 0;
+  chunks.forEach(c => { data.set(c, offset); offset += c.length; });
+
+  const buffer = new ArrayBuffer(44 + data.length * 2);
+  const view = new DataView(buffer);
+  const writeString = (pos, s) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(pos + i, s.charCodeAt(i));
+  };
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + data.length * 2, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, "data");
+  view.setUint32(40, data.length * 2, true);
+  let p = 44;
+  for (let i = 0; i < data.length; i++, p += 2) {
+    const s = Math.max(-1, Math.min(1, data[i]));
+    view.setInt16(p, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buffer;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function startBrowserVoiceRecording() {
+  if (browserVoiceRecorder) {
+    browserVoiceRecorder.stop();
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("Browser microphone API is unavailable");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AudioCtx();
+  const source = ctx.createMediaStreamSource(stream);
+  const processor = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  let speechStarted = false;
+  let voicedMs = 0;
+  let candidateRun = 0;
+  let lastVoiceAt = performance.now();
+  const startedAt = performance.now();
+  let stopped = false;
+  const minSpeechMs = 650;
+  const minStartBlocks = 3;
+  const voiceRmsThreshold = 0.014;
+
+  const stop = async () => {
+    if (stopped) return;
+    stopped = true;
+    try { processor.disconnect(); } catch (_) {}
+    try { source.disconnect(); } catch (_) {}
+    stream.getTracks().forEach(t => t.stop());
+    try { await ctx.close(); } catch (_) {}
+    browserVoiceRecorder = null;
+    setVoiceButtonState("transcribing");
+    if (!chunks.length || !speechStarted || voicedMs < minSpeechMs) {
+      setVoiceButtonState("wake_listening");
+      return;
+    }
+    const wav = encodeWav(chunks, ctx.sampleRate);
+    try {
+      await voiceFetch("/audio/upload", {
+        data: "data:audio/wav;base64," + arrayBufferToBase64(wav),
+        mime: "audio/wav",
+        conversation_id: voiceConvId,
+        chat_url: location.origin,
+      });
+    } catch (e) {
+      setVoiceButtonState("error", e.message);
+      appendMessage("assistant", "[Voice error] " + e.message);
+    }
+  };
+
+  processor.onaudioprocess = (e) => {
+    if (stopped) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const copy = new Float32Array(input);
+    chunks.push(copy);
+    let sum = 0;
+    for (let i = 0; i < copy.length; i++) sum += copy[i] * copy[i];
+    const rms = Math.sqrt(sum / Math.max(1, copy.length));
+    const now = performance.now();
+    if (rms >= voiceRmsThreshold) {
+      candidateRun += 1;
+      if (candidateRun >= minStartBlocks) {
+        speechStarted = true;
+        lastVoiceAt = now;
+        voicedMs += (copy.length / ctx.sampleRate) * 1000;
+      }
+    } else {
+      candidateRun = 0;
+    }
+    const speechConfirmed = voicedMs >= minSpeechMs;
+    if ((speechConfirmed && now - lastVoiceAt > 1300) ||
+        (!speechConfirmed && now - startedAt > 10000) ||
+        now - startedAt > 30000) {
+      stop();
+    }
+  };
+
+  source.connect(processor);
+  processor.connect(ctx.destination);
+  browserVoiceRecorder = { stop };
+  setVoiceButtonState("recording");
+}
+
+if (voiceBtn) {
+  connectVoiceEvents();
+  voiceBtn.addEventListener("click", async () => {
+    try {
+      if (isDesktopVoiceMode()) {
+        if (voiceState === "recording") {
+          await voiceFetch("/listen/stop", {});
+        } else {
+          await voiceFetch("/listen/start", {
+            conversation_id: voiceConvId,
+            chat_url: location.origin,
+          });
+        }
+      } else {
+        await startBrowserVoiceRecording();
+      }
+    } catch (e) {
+      setVoiceButtonState("error", e.message);
+      appendMessage("assistant", "[Voice error] " + e.message);
+    }
+  });
+}
+
 const modelPill = $("#model-pill");
 const settingsPanel = $("#settings-panel");
 const selProvider = $("#sel-provider");
@@ -1020,7 +1338,7 @@ saveBtn.addEventListener("click", async () => {
     vision_provider: selVisionProvider.value,
     vision_base_url: selVisionProvider.value ? selVisionBase.value.trim() : "",
     safety_mode: getSafetyModeFromToggle(),
-    ui_theme: document.documentElement.classList.contains("light") ? "light" : "dark",
+    ui_theme: currentTheme(),
   };
   const apiKey = selApiKey.value.trim();
   if (apiKey) body.api_key = apiKey;
