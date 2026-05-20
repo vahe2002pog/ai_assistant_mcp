@@ -29,6 +29,7 @@ WHISPER_MODEL = os.path.join(VOICE_DIR, "models", "ggml-small.bin")
 WAKE_WORD_DIR = os.path.join(VOICE_DIR, "wake-word")
 WAKE_WORD_TFLITE = os.path.join(WAKE_WORD_DIR, "wake_word_model.tflite")
 WAKE_WORD_KERAS = os.path.join(WAKE_WORD_DIR, "wake_word_model.keras")
+WAKE_WORD_PREPROCESSING_CONFIG = os.path.join(WAKE_WORD_DIR, "preprocessing_config.txt")
 ACTIVATION_AUDIO = os.path.join(ROOT, "src", "audio", "activation.MP3")
 DEACTIVATION_AUDIO = os.path.join(ROOT, "src", "audio", "deactivation.MP3")
 
@@ -39,8 +40,16 @@ WAKE_WINDOW_SECONDS = 1.0
 WAKE_WINDOW_SAMPLES = int(DEFAULT_SAMPLE_RATE * WAKE_WINDOW_SECONDS)
 WAKE_STEP_MS = 250
 WAKE_BLOCK_SAMPLES = int(DEFAULT_SAMPLE_RATE * WAKE_STEP_MS / 1000)
-WAKE_THRESHOLD = float(os.environ.get("COMPASS_WAKE_THRESHOLD") or "0.6")
+WAKE_THRESHOLD = float(os.environ.get("COMPASS_WAKE_THRESHOLD") or "0.8")
 WAKE_COOLDOWN_SEC = float(os.environ.get("COMPASS_WAKE_COOLDOWN") or "1.5")
+WAKE_REQUIRED_HITS = int(os.environ.get("COMPASS_WAKE_REQUIRED_HITS") or "2")
+WAKE_SMOOTHING_WINDOWS = int(os.environ.get("COMPASS_WAKE_SMOOTHING_WINDOWS") or "2")
+WAKE_FRAME_LENGTH = int(0.025 * DEFAULT_SAMPLE_RATE)
+WAKE_FRAME_STEP = int(0.010 * DEFAULT_SAMPLE_RATE)
+WAKE_FFT_LENGTH = 512
+WAKE_N_MELS = 40
+WAKE_N_MFCC = 13
+WAKE_NUM_FRAMES = 1 + (WAKE_WINDOW_SAMPLES - WAKE_FRAME_LENGTH) // WAKE_FRAME_STEP
 VOICE_SESSION_IDLE_TIMEOUT = float(os.environ.get("COMPASS_VOICE_SESSION_IDLE_TIMEOUT") or "120")
 MIN_SPEECH_SECONDS = float(os.environ.get("COMPASS_MIN_SPEECH_SECONDS") or "0.65")
 VOICE_RMS_THRESHOLD = float(os.environ.get("COMPASS_VOICE_RMS_THRESHOLD") or "0.003")
@@ -324,6 +333,8 @@ class WakeWordDetector:
         self._output_details = None
         self._np = None
         self._tf = None
+        self._mfcc_mean = 0.0
+        self._mfcc_std = 1.0
         self._load()
 
     def listen_until_detected(self, stop_event: threading.Event,
@@ -337,6 +348,8 @@ class WakeWordDetector:
         audio_buffer = np.zeros(WAKE_WINDOW_SAMPLES, dtype=np.float32)
         filled_samples = 0
         last_detection_time = 0.0
+        positive_history = []
+        consecutive_hits = 0
 
         def callback(indata, frames, time_info, status):  # noqa: ANN001
             if status:
@@ -374,13 +387,20 @@ class WakeWordDetector:
 
                 probs = self.predict(audio_buffer)
                 positive_prob = float(probs[1])
+                positive_history.append(positive_prob)
+                positive_history = positive_history[-WAKE_SMOOTHING_WINDOWS:]
+                avg_positive = float(np.mean(positive_history))
                 now = time.monotonic()
-                if (
-                    positive_prob >= self._threshold
-                    and now - last_detection_time >= WAKE_COOLDOWN_SEC
-                ):
-                    BROKER.emit("wake_detected", {"confidence": positive_prob})
+
+                if avg_positive >= self._threshold:
+                    consecutive_hits += 1
+                else:
+                    consecutive_hits = 0
+
+                if consecutive_hits >= WAKE_REQUIRED_HITS and now - last_detection_time >= WAKE_COOLDOWN_SEC:
+                    BROKER.emit("wake_detected", {"confidence": avg_positive})
                     last_detection_time = now
+                    consecutive_hits = 0
                     return True
         return False
 
@@ -388,8 +408,8 @@ class WakeWordDetector:
         np = self._np
         x = self._waveform_to_model_input(waveform_np)
         if self._model_type == "keras":
-            logits = self._model(x, training=False).numpy()[0]
-            return self._softmax(logits)
+            outputs = self._model(x, training=False).numpy()
+            return self._to_probs(outputs)
 
         interpreter = self._model
         input_details = self._input_details
@@ -400,6 +420,8 @@ class WakeWordDetector:
 
         if input_dtype != np.float32:
             scale, zero_point = input_details[0]["quantization"]
+            if scale == 0:
+                raise RuntimeError("Invalid wake-word TFLite input quantization scale")
             x = x / scale + zero_point
             x = x.astype(input_dtype)
         else:
@@ -407,13 +429,15 @@ class WakeWordDetector:
 
         interpreter.set_tensor(input_index, x)
         interpreter.invoke()
-        logits = interpreter.get_tensor(output_index)[0]
+        outputs = interpreter.get_tensor(output_index)[0]
 
         output_dtype = output_details[0]["dtype"]
         if output_dtype != np.float32:
             scale, zero_point = output_details[0]["quantization"]
-            logits = scale * (logits.astype(np.float32) - zero_point)
-        return self._softmax(logits)
+            if scale == 0:
+                raise RuntimeError("Invalid wake-word TFLite output quantization scale")
+            outputs = scale * (outputs.astype(np.float32) - zero_point)
+        return self._to_probs(outputs)
 
     def _load(self) -> None:
         import numpy as np
@@ -427,15 +451,17 @@ class WakeWordDetector:
 
         self._np = np
         self._tf = tf
+        self._load_preprocessing_config()
 
-        if os.path.isfile(WAKE_WORD_TFLITE):
+        model_path = self._find_model_path((".tflite",), [WAKE_WORD_TFLITE])
+        if model_path:
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
                     message=".*tf\\.lite\\.Interpreter is deprecated.*",
                     category=UserWarning,
                 )
-                interpreter = tf.lite.Interpreter(model_path=WAKE_WORD_TFLITE)
+                interpreter = tf.lite.Interpreter(model_path=model_path)
             interpreter.allocate_tensors()
             self._model_type = "tflite"
             self._model = interpreter
@@ -443,45 +469,100 @@ class WakeWordDetector:
             self._output_details = interpreter.get_output_details()
             return
 
-        if os.path.isfile(WAKE_WORD_KERAS):
+        model_path = self._find_model_path((".keras", ".h5"), [WAKE_WORD_KERAS])
+        if model_path:
             self._model_type = "keras"
-            self._model = tf.keras.models.load_model(WAKE_WORD_KERAS)
+            self._model = tf.keras.models.load_model(model_path)
             return
 
         raise FileNotFoundError(
             f"Wake-word model not found in {WAKE_WORD_DIR}"
         )
 
+    def _find_model_path(self, suffixes: tuple[str, ...], preferred: list[str]) -> Optional[str]:
+        for path in preferred:
+            if os.path.isfile(path):
+                return path
+        try:
+            names = sorted(os.listdir(WAKE_WORD_DIR))
+        except OSError:
+            return None
+        for name in names:
+            path = os.path.join(WAKE_WORD_DIR, name)
+            if os.path.isfile(path) and name.lower().endswith(suffixes):
+                return path
+        return None
+
+    def _load_preprocessing_config(self) -> None:
+        if not os.path.isfile(WAKE_WORD_PREPROCESSING_CONFIG):
+            return
+        values = {}
+        with open(WAKE_WORD_PREPROCESSING_CONFIG, "r", encoding="utf-8") as f:
+            for line in f:
+                if "=" not in line:
+                    continue
+                key, value = line.strip().split("=", 1)
+                values[key] = value
+        if "MEAN" in values:
+            self._mfcc_mean = float(values["MEAN"])
+        if "STD" in values:
+            self._mfcc_std = float(values["STD"]) or 1.0
+
     def _waveform_to_model_input(self, waveform_np):
         tf = self._tf
         np = self._np
         waveform = tf.convert_to_tensor(waveform_np, dtype=tf.float32)
-        spectrogram = self._get_spectrogram(waveform)
-        spectrogram = spectrogram.numpy().astype(np.float32)
-        return np.expand_dims(spectrogram, axis=0)
+        mfcc = self._get_mfcc(waveform)
+        mfcc = mfcc.numpy().astype(np.float32)
+        return np.expand_dims(mfcc, axis=0)
 
-    def _get_spectrogram(self, waveform):
+    def _get_mfcc(self, waveform):
         tf = self._tf
         waveform = waveform[:WAKE_WINDOW_SAMPLES]
-        zero_padding = tf.zeros(
-            [WAKE_WINDOW_SAMPLES] - tf.shape(waveform),
-            dtype=tf.float32,
-        )
+        padding_size = WAKE_WINDOW_SAMPLES - tf.shape(waveform)[0]
+        zero_padding = tf.zeros([padding_size], dtype=tf.float32)
         waveform = tf.cast(waveform, tf.float32)
-        equal_length = tf.concat([waveform, zero_padding], axis=0)
+        waveform = tf.concat([waveform, zero_padding], axis=0)
+        waveform.set_shape([WAKE_WINDOW_SAMPLES])
+        waveform = waveform / (tf.reduce_max(tf.abs(waveform)) + 1e-9)
+
         spectrogram = tf.signal.stft(
-            equal_length,
-            frame_length=255,
-            frame_step=128,
+            waveform,
+            frame_length=WAKE_FRAME_LENGTH,
+            frame_step=WAKE_FRAME_STEP,
+            fft_length=WAKE_FFT_LENGTH,
+            window_fn=tf.signal.hann_window,
         )
         spectrogram = tf.abs(spectrogram)
-        return spectrogram[..., tf.newaxis]
+        mel_matrix = tf.signal.linear_to_mel_weight_matrix(
+            num_mel_bins=WAKE_N_MELS,
+            num_spectrogram_bins=WAKE_FFT_LENGTH // 2 + 1,
+            sample_rate=DEFAULT_SAMPLE_RATE,
+            lower_edge_hertz=20.0,
+            upper_edge_hertz=4000.0,
+        )
+        mel_spectrogram = tf.matmul(tf.square(spectrogram), mel_matrix)
+        log_mel = tf.math.log(mel_spectrogram + 1e-6)
+        mfcc = tf.signal.mfccs_from_log_mel_spectrograms(log_mel)
+        mfcc = mfcc[..., :WAKE_N_MFCC]
+        mfcc = (mfcc - self._mfcc_mean) / self._mfcc_std
+        mfcc = mfcc[..., tf.newaxis]
+        mfcc.set_shape([WAKE_NUM_FRAMES, WAKE_N_MFCC, 1])
+        return mfcc
 
-    def _softmax(self, x):
+    def _to_probs(self, outputs):
         np = self._np
-        x = x - np.max(x)
-        e = np.exp(x)
-        return e / np.sum(e)
+        outputs = np.array(outputs)
+        if outputs.ndim == 1:
+            outputs = outputs[np.newaxis, :]
+        if np.all(outputs >= 0) and np.all(outputs <= 1):
+            sums = np.sum(outputs, axis=1)
+            if np.allclose(sums, 1.0, atol=1e-3):
+                return outputs[0]
+        outputs = outputs - np.max(outputs, axis=1, keepdims=True)
+        exp = np.exp(outputs)
+        probs = exp / np.sum(exp, axis=1, keepdims=True)
+        return probs[0]
 
 
 class VoiceSessionPanel:
