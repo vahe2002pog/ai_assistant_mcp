@@ -522,6 +522,7 @@ function connectEvents() {
         selProvider.value = cfg.provider;
         selBase.value = cfg.base_url;
         setSafetyToggle(cfg.safety_mode || "strict");
+        updateEditVisibility();
       }
     } catch (_) {}
   });
@@ -1107,9 +1108,13 @@ if (voiceBtn) {
 const modelPill = $("#model-pill");
 const settingsPanel = $("#settings-panel");
 const selProvider = $("#sel-provider");
+const mainEdit = $("#main-edit");
+const mainModelSummary = $("#main-model-summary");
+const baseRow = $("#base-row");
 const selBase = $("#sel-base");
 const selFolder = $("#sel-folder");
 const folderRow = $("#folder-row");
+const apiKeyRow = $("#apikey-row");
 const selApiKey = $("#sel-apikey");
 
 function updateFolderVisibility() {
@@ -1117,41 +1122,155 @@ function updateFolderVisibility() {
 }
 const selModel = $("#sel-model");
 const selModelCustom = $("#sel-model-custom");
+const modelSelectRow = $("#model-select-row");
+const modelCustomRow = $("#model-custom-row");
 const selVisionProvider = $("#sel-vision-provider");
 const selVisionBase = $("#sel-vision-base");
 const selVisionApiKey = $("#sel-vision-apikey");
 const selVisionModel = $("#sel-vision-model");
 const selVisionModelCustom = $("#sel-vision-model-custom");
+const visionToggle = $("#vision-toggle");
+const visionToggleLabel = $("#vision-toggle-label");
+const visionBlock = $("#vision-block");
+const visionEdit = $("#vision-edit");
+const visionModelSummary = $("#vision-model-summary");
 const visionBaseRow = $("#vision-base-row");
 const visionApiKeyRow = $("#vision-apikey-row");
+const visionModelSelectRow = $("#vision-model-select-row");
+const visionModelCustomRow = $("#vision-model-custom-row");
 const refreshVisionModelsBtn = $("#refresh-vision-models");
-const safetyToggle = $("#safety-toggle");
-const safetyLabel = $("#safety-label");
+const ollamaBlock = $("#ollama-block");
+const ollamaState = $("#ollama-state");
+const ollamaRecommended = $("#ollama-recommended");
+const ollamaCustomName = $("#ollama-custom-name");
+const ollamaAddBtn = $("#ollama-add");
+const ollamaSearchBtn = $("#ollama-search");
+const ollamaStatus = $("#ollama-status");
+const visionOllamaBlock = $("#vision-ollama-block");
+const visionOllamaState = $("#vision-ollama-state");
+const visionOllamaRecommended = $("#vision-ollama-recommended");
+const visionOllamaCustomName = $("#vision-ollama-custom-name");
+const visionOllamaAddBtn = $("#vision-ollama-add");
+const visionOllamaSearchBtn = $("#vision-ollama-search");
+const visionOllamaStatus = $("#vision-ollama-status");
 
 function setSafetyToggle(mode) {
-  const on = (mode || "strict") !== "off";
-  safetyToggle.classList.toggle("on", on);
-  safetyToggle.classList.toggle("off", !on);
-  safetyToggle.setAttribute("aria-checked", on ? "true" : "false");
-  safetyLabel.textContent = on ? "Включён" : "Отключён";
+  // Safety mode is always enabled; the old UI toggle was removed.
 }
 
 function getSafetyModeFromToggle() {
-  return safetyToggle.classList.contains("off") ? "off" : "strict";
+  return "strict";
+}
+
+function setSwitch(btn, label, on, onText, offText) {
+  btn.classList.toggle("on", on);
+  btn.classList.toggle("off", !on);
+  btn.setAttribute("aria-checked", on ? "true" : "false");
+  if (label) label.textContent = on ? onText : offText;
+}
+
+function setVisionEnabled(on) {
+  visionEnabled = !!on;
+  setSwitch(
+    visionToggle,
+    visionToggleLabel,
+    visionEnabled,
+    "Отдельная Vision модель",
+    "Отдельная Vision модель"
+  );
+  visionBlock.classList.toggle("hidden", !visionEnabled);
+  if (!visionEnabled) visionEditMode = false;
+  updateEditVisibility();
+}
+
+function providerMeta(id) {
+  return providers.find(p => p.id === id) || {};
+}
+
+function providerNeedsEdit(id, p = providerMeta(id)) {
+  if (id === "ollama") return !(p.model || (currentCfg && currentCfg.provider === "ollama" && currentCfg.model));
+  const hasModel = !!(p.model || (currentCfg && currentCfg.provider === id && currentCfg.model));
+  const hasKey = !!p.api_key_set || !p.needs_key;
+  return !hasModel || !hasKey;
+}
+
+function visionProviderNeedsEdit(id, p = providerMeta(id)) {
+  if (!id) return false;
+  const hasModel = !!(p.vision_model || (currentCfg && currentCfg.vision_provider === id && currentCfg.vision_model));
+  const hasKey = !!p.api_key_set || !p.needs_key;
+  return !hasModel || !hasKey;
+}
+
+function updateSummaries() {
+  const p = providerMeta(selProvider.value);
+  const model = (selModelCustom.value.trim() || selModel.value || p.model || (currentCfg && currentCfg.model) || "").trim();
+  mainModelSummary.textContent = model ? `Модель: ${model}` : "Модель не выбрана";
+  if (visionEnabled) {
+    const vp = providerMeta(selVisionProvider.value);
+    const vm = (selVisionModelCustom.value.trim() || selVisionModel.value || (currentCfg && currentCfg.vision_model) || vp.vision_model || "").trim();
+    const label = selVisionProvider.value ? (vp.label || selVisionProvider.value) : "как основной";
+    visionModelSummary.textContent = vm ? `${label}: ${vm}` : `${label}: модель не выбрана`;
+  }
+}
+
+function updateProviderRows() {
+  const isLocalOllama = selProvider.value === "ollama";
+  baseRow.classList.toggle("hidden", isLocalOllama);
+  apiKeyRow.classList.toggle("hidden", isLocalOllama);
+  modelSelectRow.classList.toggle("hidden", isLocalOllama);
+  modelCustomRow.classList.toggle("hidden", isLocalOllama);
+  folderRow.classList.toggle("hidden", selProvider.value !== "yandex" || isLocalOllama);
+  ollamaBlock.classList.toggle("hidden", !isLocalOllama);
+}
+
+function updateVisionRows() {
+  const isLocalOllama = selVisionProvider.value === "ollama";
+  const hasProvider = !!selVisionProvider.value;
+  visionBaseRow.classList.toggle("hidden", !hasProvider || isLocalOllama);
+  visionApiKeyRow.classList.toggle("hidden", !hasProvider || isLocalOllama);
+  visionModelSelectRow.classList.toggle("hidden", isLocalOllama);
+  visionModelCustomRow.classList.toggle("hidden", isLocalOllama);
+  visionOllamaBlock.classList.toggle("hidden", !isLocalOllama);
+}
+
+function updateEditVisibility() {
+  updateProviderRows();
+  updateVisionRows();
+  mainEdit.classList.toggle("hidden", !mainEditMode);
+  visionEdit.classList.toggle("hidden", !visionEnabled || !visionEditMode);
+  mainEditBtn.textContent = mainEditMode ? "Сохранить" : "Редактировать";
+  visionEditBtn.textContent = visionEditMode ? "Сохранить" : "Редактировать";
+  updateSummaries();
+}
+
+function setMainEditMode(on) {
+  mainEditMode = !!on;
+  updateEditVisibility();
+}
+
+function setVisionEditMode(on) {
+  visionEditMode = !!on;
+  updateEditVisibility();
 }
 
 function updateVisionProviderRowsVisibility() {
-  // Пусто = "как основной" — прячем base/key.
-  const isCustom = !!selVisionProvider.value;
-  visionBaseRow.classList.toggle("hidden", !isCustom);
-  visionApiKeyRow.classList.toggle("hidden", !isCustom);
+  updateVisionRows();
+}
+
+function updateOllamaVisibility() {
+  updateProviderRows();
 }
 const refreshModelsBtn = $("#refresh-models");
+const mainEditBtn = $("#main-settings-edit");
+const visionEditBtn = $("#vision-settings-edit");
 const saveBtn = $("#settings-save");
 const cancelBtn = $("#settings-cancel");
 
 let providers = [];
 let currentCfg = null;
+let mainEditMode = false;
+let visionEditMode = false;
+let visionEnabled = false;
 
 function updatePill(cfg) {
   if (!cfg) return;
@@ -1171,7 +1290,6 @@ async function loadConfig() {
     selProvider.value = currentCfg.provider;
     selBase.value = currentCfg.base_url;
     selFolder.value = currentCfg.folder || "";
-    updateFolderVisibility();
     selApiKey.value = "";
     selApiKey.placeholder = currentCfg.api_key_set ? "••• ключ сохранён (введите, чтобы заменить)" : "токен провайдера";
     setSafetyToggle(currentCfg.safety_mode || "strict");
@@ -1191,21 +1309,31 @@ async function loadConfig() {
     selVisionApiKey.placeholder = currentCfg.vision_api_key_set
       ? "••• ключ сохранён (введите, чтобы заменить)"
       : "токен провайдера";
-    updateVisionProviderRowsVisibility();
+    mainEditMode = providerNeedsEdit(selProvider.value);
+    visionEnabled = !!(currentCfg.vision_provider || currentCfg.vision_model);
+    visionEditMode = visionEnabled && visionProviderNeedsEdit(selVisionProvider.value || currentCfg.provider);
+    setVisionEnabled(visionEnabled);
+    updateEditVisibility();
 
     updatePill(currentCfg);
-    await refreshModels();
-    await refreshVisionModels();
+    if (mainEditMode || selProvider.value === "ollama") await refreshModels();
+    await refreshOllamaStatus();
+    if (visionEnabled && visionEditMode) await refreshVisionModels();
   } catch (_) {}
 }
 
 const _escHtml = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
-const _normModel = (m) => typeof m === "string" ? { id: m, vision: false } : { id: m.id, vision: !!m.vision };
+const _normModel = (m) => typeof m === "string"
+  ? { id: m, vision: false, installed: true, recommended: false, state: "installed", error: "", size_label: "" }
+  : { id: m.id, vision: !!m.vision, installed: m.installed !== false, recommended: !!m.recommended, state: m.state || "", error: m.error || "", size_label: m.size_label || "" };
 const _renderOpt = (m) => {
   const x = _normModel(m);
   const badge = x.vision ? " 🖼" : "";
-  const title = x.vision ? "поддерживает изображения" : "только текст";
-  return `<option value="${_escHtml(x.id)}" title="${title}">${_escHtml(x.id)}${badge}</option>`;
+  const missing = x.installed ? "" : " · скачать";
+  const title = x.installed
+    ? (x.vision ? "поддерживает изображения" : "только текст")
+    : "модель ещё не загружена";
+  return `<option value="${_escHtml(x.id)}" title="${title}">${_escHtml(x.id)}${badge}${missing}</option>`;
 };
 
 async function _fetchModels(baseUrl, apiKey, provider) {
@@ -1243,14 +1371,167 @@ async function refreshModels() {
     } else if (desiredModel) {
       selModelCustom.value = desiredModel;
     }
+    if (selProvider.value === "ollama") refreshOllamaStatus();
   } catch (_) {
     selModel.innerHTML = `<option value="">(ошибка)</option>`;
   }
 }
 
+function renderOllamaRows(container, d, selected, onSelect, target = "main") {
+  if (!container || !d) return;
+  const models = d.models || [];
+  const icons = {
+    idle: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>`,
+    downloading: `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>`,
+    installed: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>`,
+  };
+  container.innerHTML = models.map(m => {
+    const x = _normModel(m);
+    const state = x.state || (x.installed ? "installed" : "idle");
+    const action = state === "downloading" ? "cancel" : x.installed ? "delete" : "pull";
+    const title = action === "cancel" ? "Остановить" : action === "delete" ? "Удалить" : "Загрузить";
+    const size = x.size_label ? `<span class="ollama-size">${_escHtml(x.size_label)}</span>` : "";
+    return `<div class="ollama-row ${x.installed ? "installed" : ""} ${selected === x.id ? "selected" : ""}" data-model="${_escHtml(x.id)}">
+      <button class="ollama-name" type="button" title="${_escHtml(x.id)}"><span>${_escHtml(x.id)}</span>${size}</button>
+      <button class="ollama-action" type="button" data-action="${action}" title="${title}">${icons[state] || icons.idle}</button>
+    </div>`;
+  }).join("");
+  container.querySelectorAll(".ollama-name").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const row = btn.closest(".ollama-row");
+      onSelect(row.dataset.model || "");
+    });
+  });
+  container.querySelectorAll(".ollama-action").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const model = btn.closest(".ollama-row").dataset.model || "";
+      const action = btn.dataset.action;
+      if (action === "cancel") cancelOllamaPull();
+      else if (action === "delete") deleteOllamaModel(model);
+      else pullOllamaModel(model, target);
+    });
+  });
+}
+
+function renderOllamaStatus(d) {
+  if (!d) return;
+  const pull = d.pull || {};
+  const status = pull.active ? (pull.status || `Загружаю ${pull.model}...`) : (pull.error || pull.status || "");
+  if (selProvider.value === "ollama" && ollamaBlock) {
+    ollamaState.textContent = d.running ? "запущена" : "остановлена";
+    ollamaStatus.textContent = status;
+    renderOllamaRows(
+      ollamaRecommended,
+      d,
+      (selModel.value || (currentCfg && currentCfg.model) || "").trim(),
+      (model) => {
+        selModelCustom.value = "";
+        selModel.value = model;
+        updateSummaries();
+        renderOllamaStatus(d);
+      },
+      "main"
+    );
+  }
+  if (visionEnabled && selVisionProvider.value === "ollama" && visionOllamaBlock) {
+    visionOllamaState.textContent = d.running ? "запущена" : "остановлена";
+    visionOllamaStatus.textContent = status;
+    renderOllamaRows(
+      visionOllamaRecommended,
+      d,
+      (selVisionModelCustom.value.trim() || selVisionModel.value || (currentCfg && currentCfg.vision_model) || "").trim(),
+      (model) => {
+        selVisionModel.value = "";
+        selVisionModelCustom.value = model;
+        if (visionOllamaCustomName) visionOllamaCustomName.value = "";
+        updateSummaries();
+        renderOllamaStatus(d);
+      },
+      "vision"
+    );
+  }
+}
+
+async function refreshOllamaStatus() {
+  if (selProvider.value !== "ollama" && (!visionEnabled || selVisionProvider.value !== "ollama")) return;
+  updateOllamaVisibility();
+  updateVisionRows();
+  try {
+    const d = await (await fetch("/api/ollama/status")).json();
+    renderOllamaStatus(d);
+    if (d.pull && d.pull.active) setTimeout(refreshOllamaStatus, 2500);
+  } catch (_) {
+    if (ollamaState) ollamaState.textContent = "недоступна";
+    if (visionOllamaState) visionOllamaState.textContent = "недоступна";
+  }
+}
+
+async function pullOllamaModel(name = "", target = "main") {
+  const custom = target === "vision" ? visionOllamaCustomName : ollamaCustomName;
+  const statusEl = target === "vision" ? visionOllamaStatus : ollamaStatus;
+  const model = (name || (custom && custom.value.trim()) || selModel.value || "").trim();
+  if (!model) return;
+  if (target === "vision") {
+    selVisionModel.value = "";
+    selVisionModelCustom.value = model;
+  } else {
+    selModelCustom.value = model;
+  }
+  if (statusEl) statusEl.textContent = `Загружаю ${model}...`;
+  try {
+    const r = await fetch("/api/ollama/pull", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const d = await r.json();
+    renderOllamaStatus(d);
+    if (!r.ok && d.error && statusEl) statusEl.textContent = d.error;
+    setTimeout(async () => {
+      await refreshOllamaStatus();
+      await refreshModels();
+      if (visionEnabled) await refreshVisionModels();
+    }, 2500);
+  } catch (e) {
+    if (statusEl) statusEl.textContent = e.message;
+  }
+}
+async function cancelOllamaPull() {
+  const d = await (await fetch("/api/ollama/cancel", { method: "POST" })).json();
+  renderOllamaStatus(d);
+  await refreshModels();
+  if (visionEnabled) await refreshVisionModels();
+}
+
+async function deleteOllamaModel(model) {
+  if (!model) return;
+  const r = await fetch("/api/ollama/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  const d = await r.json();
+  renderOllamaStatus(d);
+  if (!r.ok && d.error) {
+    if (ollamaStatus) ollamaStatus.textContent = d.error;
+    if (visionOllamaStatus) visionOllamaStatus.textContent = d.error;
+  }
+  await refreshModels();
+  if (visionEnabled) await refreshVisionModels();
+}
+
 async function refreshVisionModels() {
   selVisionModel.innerHTML = `<option value="">(загрузка…)</option>`;
   try {
+    if (selVisionProvider.value === "ollama") {
+      selVisionModel.innerHTML = "";
+      await refreshOllamaStatus();
+      return;
+    }
     // Если vision-провайдер не выбран — берём модели основного (с его base/key).
     const useCustom = !!selVisionProvider.value;
     const base = useCustom ? selVisionBase.value : selBase.value;
@@ -1278,15 +1559,45 @@ selProvider.addEventListener("change", () => {
   const p = providers.find(x => x.id === selProvider.value);
   if (p) selBase.value = p.base_url;
   selModelCustom.value = (p && p.model) ? p.model : "";
+  if (p && p.model) selModel.value = p.model;
   selApiKey.value = "";
   selApiKey.placeholder = (p && p.api_key_set)
     ? "••• ключ сохранён (введите, чтобы заменить)"
     : "токен провайдера";
-  updateFolderVisibility();
-  refreshModels();
+  mainEditMode = providerNeedsEdit(selProvider.value, p);
+  updateEditVisibility();
+  if (mainEditMode || selProvider.value === "ollama") refreshModels();
+  refreshOllamaStatus();
 });
 refreshModelsBtn.addEventListener("click", refreshModels);
-selBase.addEventListener("change", refreshModels);
+if (ollamaAddBtn) ollamaAddBtn.addEventListener("click", () => pullOllamaModel());
+if (ollamaSearchBtn) ollamaSearchBtn.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  window.open("https://ollama.com/search?c=vision&c=tools", "_blank", "noopener");
+});
+if (ollamaCustomName) ollamaCustomName.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    pullOllamaModel();
+  }
+});
+if (visionOllamaAddBtn) visionOllamaAddBtn.addEventListener("click", () => pullOllamaModel("", "vision"));
+if (visionOllamaSearchBtn) visionOllamaSearchBtn.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  window.open("https://ollama.com/search?c=vision&c=tools", "_blank", "noopener");
+});
+if (visionOllamaCustomName) visionOllamaCustomName.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    pullOllamaModel("", "vision");
+  }
+});
+selBase.addEventListener("change", () => {
+  refreshModels();
+  updateSummaries();
+});
 selApiKey.addEventListener("change", () => {
   refreshModels();
   // Если vision использует основной провайдер — его модели тоже могут пересортироваться.
@@ -1305,38 +1616,72 @@ selVisionProvider.addEventListener("change", () => {
   } else {
     selVisionBase.value = "";
   }
+  visionEditMode = visionProviderNeedsEdit(selVisionProvider.value || selProvider.value);
   updateVisionProviderRowsVisibility();
-  refreshVisionModels();
+  updateEditVisibility();
+  if (visionEditMode) refreshVisionModels();
 });
 selVisionBase.addEventListener("change", refreshVisionModels);
 selVisionApiKey.addEventListener("change", refreshVisionModels);
 refreshVisionModelsBtn.addEventListener("click", refreshVisionModels);
-safetyToggle.addEventListener("click", () => {
-  setSafetyToggle(getSafetyModeFromToggle() === "off" ? "strict" : "off");
+visionToggle.addEventListener("click", () => {
+  setVisionEnabled(!visionEnabled);
+  if (visionEnabled) {
+    if (!selVisionProvider.value) selVisionProvider.value = selProvider.value;
+    visionEditMode = visionProviderNeedsEdit(selVisionProvider.value || selProvider.value);
+    if (visionEditMode) refreshVisionModels();
+  }
+  updateEditVisibility();
 });
+selModel.addEventListener("change", updateSummaries);
+selModelCustom.addEventListener("input", updateSummaries);
+selVisionModel.addEventListener("change", updateSummaries);
+selVisionModelCustom.addEventListener("input", updateSummaries);
 
 modelPill.addEventListener("click", (e) => {
   e.stopPropagation();
   settingsPanel.classList.toggle("hidden");
+  updateEditVisibility();
 });
 document.addEventListener("click", (e) => {
-  if (!settingsPanel.contains(e.target) && e.target !== modelPill) {
+  const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+  const insideSettings = path.includes(settingsPanel) || settingsPanel.contains(e.target);
+  const onModelPill = path.includes(modelPill) || e.target === modelPill;
+  if (!insideSettings && !onModelPill) {
     settingsPanel.classList.add("hidden");
   }
 });
 cancelBtn.addEventListener("click", () => settingsPanel.classList.add("hidden"));
 
-saveBtn.addEventListener("click", async () => {
-  const model = (selModelCustom.value.trim() || selModel.value || "").trim();
-  const visionModel = (selVisionModelCustom.value.trim() || selVisionModel.value || "").trim();
+mainEditBtn.addEventListener("click", async () => {
+  if (mainEditMode) {
+    await saveSettings({ closePanel: false });
+  } else {
+    setMainEditMode(true);
+    await refreshModels();
+  }
+});
+
+visionEditBtn.addEventListener("click", async () => {
+  if (visionEditMode) {
+    await saveSettings({ closePanel: false });
+  } else {
+    setVisionEditMode(true);
+    await refreshVisionModels();
+  }
+});
+
+async function saveSettings({ closePanel = true } = {}) {
+  const model = (selModelCustom.value.trim() || selModel.value || (currentCfg && currentCfg.model) || "").trim();
+  const visionModel = (selVisionModelCustom.value.trim() || selVisionModel.value || (currentCfg && currentCfg.vision_model) || "").trim();
   const body = {
     provider: selProvider.value,
-    base_url: selBase.value.trim(),
+    base_url: selProvider.value === "ollama" ? "" : selBase.value.trim(),
     model,
-    vision_model: visionModel,
+    vision_model: visionEnabled ? visionModel : "",
     folder: selFolder.value.trim(),
-    vision_provider: selVisionProvider.value,
-    vision_base_url: selVisionProvider.value ? selVisionBase.value.trim() : "",
+    vision_provider: visionEnabled ? selVisionProvider.value : "",
+    vision_base_url: visionEnabled && selVisionProvider.value && selVisionProvider.value !== "ollama" ? selVisionBase.value.trim() : "",
     safety_mode: getSafetyModeFromToggle(),
     ui_theme: currentTheme(),
   };
@@ -1354,7 +1699,16 @@ saveBtn.addEventListener("click", async () => {
     currentCfg = d.config;
     if (apiKey) {
       const p = providers.find(x => x.id === currentCfg.provider);
-      if (p) p.api_key_set = true;
+      if (p) {
+        p.api_key_set = true;
+        p.configured = true;
+      }
+    }
+    const p = providers.find(x => x.id === currentCfg.provider);
+    if (p) {
+      p.model = currentCfg.model;
+      p.base_url = currentCfg.base_url;
+      p.configured = true;
     }
     updatePill(currentCfg);
     selModelCustom.value = "";
@@ -1366,11 +1720,17 @@ saveBtn.addEventListener("click", async () => {
       ? "••• ключ сохранён (введите, чтобы заменить)"
       : "токен провайдера";
     selApiKey.placeholder = currentCfg.api_key_set ? "••• ключ сохранён (введите, чтобы заменить)" : "токен провайдера";
-    settingsPanel.classList.add("hidden");
+    mainEditMode = false;
+    visionEditMode = false;
+    setVisionEnabled(!!(currentCfg.vision_provider || currentCfg.vision_model));
+    updateEditVisibility();
+    if (closePanel) settingsPanel.classList.add("hidden");
   } catch (err) {
     alert("Ошибка: " + err.message);
   }
-});
+}
+
+saveBtn.addEventListener("click", saveSettings);
 
 loadConfig();
 loadConversations();
@@ -1378,8 +1738,20 @@ loadConversations();
 // ── Контекстное меню для сообщений ──────────────────────────────────
 const ctxMenu = $("#ctx-menu");
 let ctxTarget = null;    // .msg element
+let ctxInput = null;     // input/textarea element
 let ctxSelection = "";   // выделенный текст
 let ctxFull = "";        // полный текст сообщения
+const TEXT_CONTROL_SELECTOR = [
+  "textarea",
+  "input:not([type])",
+  "input[type='text']",
+  "input[type='search']",
+  "input[type='url']",
+  "input[type='email']",
+  "input[type='password']",
+  "input[type='number']",
+  "input[type='tel']"
+].join(",");
 
 function getMsgText(msgEl) {
   const c = msgEl.querySelector(".content");
@@ -1399,14 +1771,74 @@ function openCtxMenu(x, y) {
 function closeCtxMenu() {
   ctxMenu.classList.add("hidden");
   ctxTarget = null;
+  ctxInput = null;
   ctxSelection = "";
   ctxFull = "";
 }
+
+function setCtxItem(action, { text = "", visible = true, disabled = false } = {}) {
+  const item = ctxMenu.querySelector(`[data-action="${action}"]`);
+  if (!item) return;
+  item.hidden = !visible;
+  item.disabled = disabled;
+  if (text) item.textContent = text;
+}
+
+function selectedTextFromControl(el) {
+  if (!el || typeof el.selectionStart !== "number") return "";
+  return el.value.slice(el.selectionStart, el.selectionEnd);
+}
+
+function replaceControlSelection(el, text) {
+  const s = el.selectionStart ?? el.value.length;
+  const e = el.selectionEnd ?? el.value.length;
+  el.value = el.value.slice(0, s) + text + el.value.slice(e);
+  const pos = s + text.length;
+  el.setSelectionRange(pos, pos);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch (_) {}
+    ta.remove();
+  }
+}
+
+document.addEventListener("contextmenu", (e) => {
+  const control = e.target.closest(TEXT_CONTROL_SELECTOR);
+  if (!control) return;
+  e.preventDefault();
+  ctxInput = control;
+  ctxTarget = null;
+  ctxFull = "";
+  ctxSelection = selectedTextFromControl(control);
+  const editable = !control.disabled && !control.readOnly;
+  const hasSelection = !!ctxSelection;
+  const hasText = !!control.value;
+
+  setCtxItem("copy", { text: "Копировать", visible: true, disabled: !hasSelection });
+  setCtxItem("cut", { text: "Вырезать", visible: true, disabled: !editable || !hasSelection });
+  setCtxItem("paste", { text: "Вставить", visible: true, disabled: !editable });
+  setCtxItem("select-all", { text: "Выделить всё", visible: true, disabled: !hasText });
+  setCtxItem("reply", { visible: false });
+
+  openCtxMenu(e.clientX, e.clientY);
+}, true);
 
 messagesEl.addEventListener("contextmenu", (e) => {
   const msg = e.target.closest(".msg");
   if (!msg) return;
   e.preventDefault();
+  ctxInput = null;
   ctxTarget = msg;
   ctxFull = getMsgText(msg);
   const sel = window.getSelection();
@@ -1414,12 +1846,19 @@ messagesEl.addEventListener("contextmenu", (e) => {
     ? sel.toString() : "";
   ctxSelection = selText;
 
-  const copyBtn = ctxMenu.querySelector('[data-action="copy"]');
-  const replyBtn = ctxMenu.querySelector('[data-action="reply"]');
-  copyBtn.textContent = selText ? "Копировать выделенное" : "Копировать сообщение";
-  copyBtn.disabled = !(selText || ctxFull);
-  replyBtn.disabled = !(selText || ctxFull);
-  replyBtn.textContent = selText ? "Ответить на фрагмент" : "Ответить на сообщение";
+  setCtxItem("copy", {
+    text: selText ? "Копировать выделенное" : "Копировать сообщение",
+    visible: true,
+    disabled: !(selText || ctxFull),
+  });
+  setCtxItem("cut", { visible: false });
+  setCtxItem("paste", { visible: false });
+  setCtxItem("select-all", { visible: false });
+  setCtxItem("reply", {
+    text: selText ? "Ответить на фрагмент" : "Ответить на сообщение",
+    visible: true,
+    disabled: !(selText || ctxFull),
+  });
 
   openCtxMenu(e.clientX, e.clientY);
 });
@@ -1428,16 +1867,22 @@ ctxMenu.addEventListener("click", async (e) => {
   const btn = e.target.closest(".ctx-item");
   if (!btn || btn.disabled) return;
   const action = btn.dataset.action;
-  const text = ctxSelection || ctxFull;
+  const text = ctxInput ? selectedTextFromControl(ctxInput) : (ctxSelection || ctxFull);
 
   if (action === "copy") {
-    try { await navigator.clipboard.writeText(text); }
-    catch (_) {
-      const ta = document.createElement("textarea");
-      ta.value = text; document.body.appendChild(ta);
-      ta.select(); try { document.execCommand("copy"); } catch (_) {}
-      ta.remove();
+    await copyText(text);
+  } else if (action === "cut" && ctxInput) {
+    await copyText(text);
+    if (!ctxInput.readOnly && !ctxInput.disabled) {
+      ctxInput.focus();
+      replaceControlSelection(ctxInput, "");
     }
+  } else if (action === "paste" && ctxInput) {
+    ctxInput.focus();
+    try { document.execCommand("paste"); } catch (_) {}
+  } else if (action === "select-all" && ctxInput) {
+    ctxInput.focus();
+    ctxInput.select();
   } else if (action === "reply") {
     setPendingQuote(text);
     inputEl.focus();

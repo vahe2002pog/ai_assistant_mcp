@@ -23,7 +23,7 @@ os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VOICE_DIR = os.path.join(ROOT, "voice")
-WHISPER_DIR = os.path.join(VOICE_DIR, "whisper")
+WHISPER_DIR = os.path.join(ROOT, "utils", "whisper")
 WHISPER_CLI = os.path.join(WHISPER_DIR, "whisper-cli.exe")
 WHISPER_MODEL = os.path.join(VOICE_DIR, "models", "ggml-small.bin")
 WAKE_WORD_DIR = os.path.join(VOICE_DIR, "wake-word")
@@ -40,7 +40,7 @@ WAKE_WINDOW_SECONDS = 1.0
 WAKE_WINDOW_SAMPLES = int(DEFAULT_SAMPLE_RATE * WAKE_WINDOW_SECONDS)
 WAKE_STEP_MS = 250
 WAKE_BLOCK_SAMPLES = int(DEFAULT_SAMPLE_RATE * WAKE_STEP_MS / 1000)
-WAKE_THRESHOLD = float(os.environ.get("COMPASS_WAKE_THRESHOLD") or "0.8")
+WAKE_THRESHOLD = float(os.environ.get("COMPASS_WAKE_THRESHOLD") or "0.7")
 WAKE_COOLDOWN_SEC = float(os.environ.get("COMPASS_WAKE_COOLDOWN") or "1.5")
 WAKE_REQUIRED_HITS = int(os.environ.get("COMPASS_WAKE_REQUIRED_HITS") or "2")
 WAKE_SMOOTHING_WINDOWS = int(os.environ.get("COMPASS_WAKE_SMOOTHING_WINDOWS") or "2")

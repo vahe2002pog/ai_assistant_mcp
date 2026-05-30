@@ -29,6 +29,12 @@ PROVIDERS = {
     },
     "ollama": {
         "label": "Ollama",
+        "base_url": "http://127.0.0.1:11435/v1",
+        "api_key":  "ollama",
+        "extra_body": {"think": False, "chat_template_kwargs": {"enable_thinking": False}},
+    },
+    "ollama_ui": {
+        "label": "Ollama UI (внешняя)",
         "base_url": "http://localhost:11434/v1",
         "api_key":  "ollama",
         "extra_body": {"think": False, "chat_template_kwargs": {"enable_thinking": False}},
@@ -102,6 +108,10 @@ def _provider_settings(s: dict) -> dict:
     if not isinstance(settings, dict):
         settings = {}
         s["provider_settings"] = settings
+    if "ollama" in settings and "ollama_ui" not in settings:
+        old = settings.get("ollama")
+        if isinstance(old, dict) and "11434" in str(old.get("base_url", "")):
+            settings["ollama_ui"] = dict(old)
     return settings
 
 
@@ -117,8 +127,39 @@ def _remember_provider_settings(s: dict, provider: str) -> None:
         item["base_url"] = s.get("base_url", "")
     if s.get("model") is not None:
         item["model"] = s.get("model", "")
+
+
+def _remember_vision_provider_settings(s: dict, provider: str) -> None:
+    if not provider:
+        return
+    settings = _provider_settings(s)
+    item = settings.setdefault(provider, {})
+    if not isinstance(item, dict):
+        item = {}
+        settings[provider] = item
     if s.get("vision_model") is not None:
         item["vision_model"] = s.get("vision_model", "")
+
+
+def _clear_missing_local_ollama_vision_model(s: dict) -> bool:
+    if (s.get("vision_provider") or "").strip() != "ollama":
+        return False
+    model = (s.get("vision_model") or "").strip()
+    if not model:
+        return False
+    try:
+        from ui_automation import ollama_manager as _ollama
+        if not _ollama.ensure_running(timeout=3.0):
+            return False
+        if model not in set(_ollama.installed_models()):
+            s["vision_model"] = ""
+            item = _provider_settings(s).setdefault("ollama", {})
+            if isinstance(item, dict):
+                item["vision_model"] = ""
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _saved_provider_setting(s: dict, provider: str, key: str, default: str = "") -> str:
@@ -165,8 +206,14 @@ def _load() -> dict:
     s.setdefault("vision_provider", "")
     s.setdefault("vision_base_url", "")
     s.setdefault("ui_theme", "dark")
+    if prov_name == "ollama":
+        s["base_url"] = PROVIDERS["ollama"]["base_url"]
+    if (s.get("vision_provider") or "").strip() == "ollama":
+        s["vision_base_url"] = PROVIDERS["ollama"]["base_url"]
     _provider_settings(s)
     _remember_provider_settings(s, prov_name)
+    cleaned_local_vision = _clear_missing_local_ollama_vision_model(s)
+    _remember_vision_provider_settings(s, (s.get("vision_provider") or "").strip())
 
     # api_key/folder — из БД (шифрованно); для локальных провайдеров подставляем
     # технический ключ по умолчанию ("llama"/"ollama"), чтобы OpenAI SDK не ругался.
@@ -177,6 +224,8 @@ def _load() -> dict:
         folder = os.environ.get("YANDEX_CLOUD_FOLDER", "")
     s["api_key"] = api_key
     s["folder"] = folder
+    if prov_name == "ollama":
+        s["api_key"] = PROVIDERS["ollama"]["api_key"]
 
     _state = s
     # Зеркалим в env, чтобы старый код, читающий os.environ, видел актуальные значения.
@@ -185,7 +234,7 @@ def _load() -> dict:
     os.environ["API_MODEL"] = s["model"]
 
     # Перезаписываем файл без секретов (однократно после миграции).
-    if legacy_key is not None or legacy_folder is not None:
+    if legacy_key is not None or legacy_folder is not None or cleaned_local_vision:
         _persist()
     return s
 
@@ -222,6 +271,12 @@ def get_provider_ui_settings(provider: str) -> dict:
     """Saved non-secret UI settings for one provider."""
     s = get()
     prov = PROVIDERS.get(provider, PROVIDERS["custom"])
+    if provider == "ollama":
+        return {
+            "base_url": prov["base_url"],
+            "model": _saved_provider_setting(s, provider, "model", ""),
+            "vision_model": _saved_provider_setting(s, provider, "vision_model", ""),
+        }
     return {
         "base_url": _saved_provider_setting(s, provider, "base_url", prov["base_url"]),
         "model": _saved_provider_setting(s, provider, "model", ""),
@@ -311,6 +366,12 @@ def get_vision_client() -> openai.OpenAI:
     with _lock:
         s = _load()
         v = _vision_view(s)
+        if v.get("provider") == "ollama":
+            try:
+                from ui_automation import ollama_manager as _ollama
+                _ollama.ensure_running()
+            except Exception:
+                pass
         same_as_main = (v["base_url"] == s["base_url"]
                         and v["api_key"]  == s["api_key"]
                         and (v["folder"] if v["provider"] == "yandex" else "")
@@ -342,6 +403,12 @@ def get_client() -> openai.OpenAI:
     global _client, _client_key
     with _lock:
         s = _load()
+        if s.get("provider") == "ollama":
+            try:
+                from ui_automation import ollama_manager as _ollama
+                _ollama.ensure_running()
+            except Exception:
+                pass
         folder = s.get("folder", "") if s.get("provider") == "yandex" else ""
         key = (s["base_url"], s["api_key"], folder)
         if _client is None or _client_key != key:
@@ -376,20 +443,21 @@ def set_config(provider: Optional[str] = None,
                 prov = PROVIDERS[provider]
                 saved_base = _saved_provider_setting(s, provider, "base_url", prov["base_url"])
                 saved_model = _saved_provider_setting(s, provider, "model", s.get("model", ""))
-                saved_vision_model = _saved_provider_setting(s, provider, "vision_model", s.get("vision_model", ""))
                 s["base_url"] = base_url or saved_base or prov["base_url"]
                 if saved_model:
                     s["model"] = saved_model
-                if saved_vision_model is not None:
-                    s["vision_model"] = saved_vision_model
                 # Подтягиваем ранее сохранённые секреты для выбранного провайдера.
                 stored_key, stored_folder = _provider_secrets(provider)
                 s["api_key"] = api_key or stored_key or prov["api_key"]
                 s["folder"] = (folder if folder is not None else stored_folder) or ""
             s["provider"] = provider
+        if s.get("provider") == "ollama":
+            s["base_url"] = PROVIDERS["ollama"]["base_url"]
+            s["api_key"] = PROVIDERS["ollama"]["api_key"]
         if base_url:
-            s["base_url"] = base_url
-        if api_key:
+            if s.get("provider") != "ollama":
+                s["base_url"] = base_url
+        if api_key and s.get("provider") != "ollama":
             s["api_key"] = api_key
         if model:
             s["model"] = model
@@ -406,11 +474,16 @@ def set_config(provider: Optional[str] = None,
             if vp and vp != s.get("vision_provider"):
                 prov = PROVIDERS[vp]
                 s["vision_base_url"] = (vision_base_url or "").strip() or prov["base_url"]
+                s["vision_model"] = _saved_provider_setting(s, vp, "vision_model", "")
             s["vision_provider"] = vp
             if not vp:
                 s["vision_base_url"] = ""
+                s["vision_model"] = ""
+            elif vp == "ollama":
+                s["vision_base_url"] = PROVIDERS["ollama"]["base_url"]
         if vision_base_url is not None:
-            s["vision_base_url"] = vision_base_url.strip()
+            if (s.get("vision_provider") or "").strip() != "ollama":
+                s["vision_base_url"] = vision_base_url.strip()
         if vision_api_key:
             # Секрет сохраняем под ключом того провайдера, который выбран для vision.
             vp = (s.get("vision_provider") or "").strip()
@@ -425,7 +498,9 @@ def set_config(provider: Optional[str] = None,
         # ввёл, чтобы не перезаписать технический дефолт ("llama"/"ollama").
         if ui_theme is not None:
             s["ui_theme"] = "light" if str(ui_theme).strip().lower() == "light" else "dark"
+        _clear_missing_local_ollama_vision_model(s)
         _remember_provider_settings(s, s.get("provider", ""))
+        _remember_vision_provider_settings(s, (s.get("vision_provider") or "").strip())
 
         try:
             import database as _db
@@ -445,6 +520,18 @@ def set_config(provider: Optional[str] = None,
         _vision_client = None
         _vision_client_key = None
         _persist()
+        try:
+            from ui_automation import ollama_manager as _ollama
+            needs_ollama = (
+                s.get("provider") == "ollama"
+                or (s.get("vision_provider") or "").strip() == "ollama"
+            )
+            if needs_ollama:
+                _ollama.ensure_running()
+            else:
+                _ollama.stop_if_owned()
+        except Exception:
+            pass
         return dict(s)
 
 
@@ -517,7 +604,8 @@ def list_model_groups(base_url: Optional[str] = None,
 
 
 def list_models(base_url: Optional[str] = None,
-                api_key: Optional[str] = None) -> List[dict]:
+                api_key: Optional[str] = None,
+                provider: Optional[str] = None) -> List[dict]:
     """Запрашивает у провайдера список моделей.
 
     Пробует:
@@ -526,8 +614,20 @@ def list_models(base_url: Optional[str] = None,
       3) Ollama-native /api/tags.
     """
     cfg = get()
+    provider = provider or cfg.get("provider", "")
     url = (base_url or cfg["base_url"]).rstrip("/")
     key = api_key if api_key is not None else cfg.get("api_key", "")
+    if provider == "ollama":
+        try:
+            from ui_automation import ollama_manager as _ollama
+            _ollama.ensure_running(timeout=3.0)
+            return _ollama.list_model_entries()
+        except Exception:
+            return [
+                {"id": "qwen3.5:2b", "vision": False, "installed": False, "recommended": True},
+                {"id": "qwen3.5:4b", "vision": False, "installed": False, "recommended": True},
+                {"id": "qwen3.5:9b", "vision": False, "installed": False, "recommended": True},
+            ]
 
     def _fetch(u: str, headers: dict) -> Optional[dict]:
         try:

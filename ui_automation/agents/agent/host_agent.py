@@ -130,30 +130,35 @@ class HostAgent:
             {"role": "system", "content": _CHAT_SYSTEM_PROMPT},
             {"role": "user",   "content": task},
         ]
+        last_finish_reason = ""
         for extra in (_llm.get_extra_body(), {}):
             try:
-                kwargs = dict(
-                    model=_llm.get_model(),
-                    messages=messages,
-                    temperature=0.7,
-                    max_tokens=1024,
-                )
-                if extra:
-                    kwargs["extra_body"] = extra
-                resp = _llm.get_client().chat.completions.create(**kwargs)
-                msg = resp.choices[0].message
-                text = (msg.content or "").strip()
-                if text:
-                    return _strip_task_done(text)
-                reasoning = getattr(msg, "reasoning_content", None) or ""
-                if reasoning.strip():
-                    return _strip_task_done(reasoning.strip())
+                for max_tokens in (1024, 4096):
+                    kwargs = dict(
+                        model=_llm.get_model(),
+                        messages=messages,
+                        temperature=0.7,
+                        max_tokens=max_tokens,
+                    )
+                    if extra:
+                        kwargs["extra_body"] = extra
+                    resp = _llm.get_client().chat.completions.create(**kwargs)
+                    choice = resp.choices[0]
+                    last_finish_reason = str(getattr(choice, "finish_reason", "") or "")
+                    msg = choice.message
+                    text = (msg.content or "").strip()
+                    if text:
+                        return _strip_task_done(text)
+                    if last_finish_reason != "length":
+                        break
             except openai.APIConnectionError:
                 return "Ошибка: нет соединения с моделью."
             except Exception as e:
                 print(f"[ChatAgent] ошибка: {e}", flush=True)
                 if not extra:
                     return f"Ошибка LLM: {e}"
+        if last_finish_reason == "length":
+            return "Модель не успела сформировать финальный ответ. Попробуйте выбрать модель побольше или повторить запрос."
         return "Не удалось получить ответ от модели."
 
     # ── Blackboard context ────────────────────────────────────────────────────

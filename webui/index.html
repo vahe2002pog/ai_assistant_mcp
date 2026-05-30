@@ -74,36 +74,57 @@
               <label>Провайдер</label>
               <select id="sel-provider"></select>
             </div>
-            <div class="settings-row">
-              <label>Base URL</label>
-              <input id="sel-base" type="text" spellcheck="false" />
+            <div class="settings-summary-row">
+              <div id="main-model-summary" class="settings-summary">Модель не выбрана</div>
+              <button id="main-settings-edit" class="btn-ghost btn-summary" type="button">Редактировать</button>
             </div>
-            <div id="folder-row" class="settings-row hidden">
-              <label title="Yandex Cloud folder ID">Folder ID</label>
-              <input id="sel-folder" type="text" spellcheck="false" placeholder="b1g..." />
-            </div>
-            <div class="settings-row">
-              <label>API-ключ</label>
-              <input id="sel-apikey" type="password" spellcheck="false" autocomplete="off" placeholder="токен провайдера" />
-            </div>
-            <div class="settings-row">
-              <label>Модель</label>
-              <div class="model-row">
-                <select id="sel-model"></select>
-                <button id="refresh-models" class="btn-mini" type="button" title="Обновить">⟳</button>
+            <div id="main-edit" class="settings-edit hidden">
+              <div id="base-row" class="settings-row">
+                <label>Base URL</label>
+                <input id="sel-base" type="text" spellcheck="false" />
+              </div>
+              <div id="folder-row" class="settings-row hidden">
+                <label title="Yandex Cloud folder ID">Folder ID</label>
+                <input id="sel-folder" type="text" spellcheck="false" placeholder="b1g..." />
+              </div>
+              <div id="apikey-row" class="settings-row">
+                <label>API-ключ</label>
+                <input id="sel-apikey" type="password" spellcheck="false" autocomplete="off" placeholder="токен провайдера" />
+              </div>
+              <div id="model-select-row" class="settings-row">
+                <label>Модель</label>
+                <div class="model-row">
+                  <select id="sel-model"></select>
+                  <button id="refresh-models" class="btn-mini" type="button" title="Обновить">⟳</button>
+                </div>
+              </div>
+              <div id="model-custom-row" class="settings-row">
+                <input id="sel-model-custom" type="text" placeholder="или введи имя модели вручную" spellcheck="false" />
+              </div>
+              <div id="ollama-block" class="ollama-block hidden">
+                <div class="ollama-head">
+                  <span>Ollama</span>
+                  <span id="ollama-state" class="ollama-state">проверка…</span>
+                </div>
+                <div id="ollama-recommended" class="ollama-list"></div>
+                <div class="ollama-add">
+                  <input id="ollama-custom-name" type="text" placeholder="Добавить модель" spellcheck="false" />
+                  <button id="ollama-add" class="btn-mini" type="button" title="Добавить">+</button>
+                  <button id="ollama-search" class="btn-mini" type="button" title="Открыть каталог Ollama">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+                  </button>
+                </div>
+                <span id="ollama-status" class="ollama-status"></span>
               </div>
             </div>
             <div class="settings-row">
-              <input id="sel-model-custom" type="text" placeholder="или введи имя модели вручную" spellcheck="false" />
-            </div>
-            <div class="settings-row safety-row">
-              <label>Безопасный режим</label>
-              <button id="safety-toggle" class="switch on" type="button" role="switch" aria-checked="true" title="Включает или отключает safety-guard">
+              <label>Vision</label>
+              <button id="vision-toggle" class="switch off" type="button" role="switch" aria-checked="false" title="Использовать отдельную vision-модель">
                 <span class="switch-track"><span class="switch-thumb"></span></span>
-                <span id="safety-label" class="switch-label">Включён</span>
+                <span id="vision-toggle-label" class="switch-label">Отдельная Vision модель</span>
               </button>
             </div>
-            <div id="vision-block">
+            <div id="vision-block" class="hidden">
               <div class="settings-row settings-section">
                 <label>Vision (картинки)</label>
               </div>
@@ -111,23 +132,44 @@
                 <label title="Оставь пусто, чтобы использовать основной провайдер.">Провайдер</label>
                 <select id="sel-vision-provider"></select>
               </div>
-              <div id="vision-base-row" class="settings-row hidden">
-                <label>Base URL</label>
-                <input id="sel-vision-base" type="text" spellcheck="false" />
+              <div class="settings-summary-row">
+                <div id="vision-model-summary" class="settings-summary">Vision модель не выбрана</div>
+                <button id="vision-settings-edit" class="btn-ghost btn-summary" type="button">Редактировать</button>
               </div>
-              <div id="vision-apikey-row" class="settings-row hidden">
-                <label>API-ключ</label>
-                <input id="sel-vision-apikey" type="password" spellcheck="false" autocomplete="off" placeholder="токен провайдера" />
-              </div>
-              <div class="settings-row">
-                <label>Модель</label>
-                <div class="model-row">
-                  <select id="sel-vision-model"></select>
-                  <button id="refresh-vision-models" class="btn-mini" type="button" title="Обновить">⟳</button>
+              <div id="vision-edit" class="settings-edit hidden">
+                <div id="vision-base-row" class="settings-row hidden">
+                  <label>Base URL</label>
+                  <input id="sel-vision-base" type="text" spellcheck="false" />
                 </div>
-              </div>
-              <div class="settings-row">
-                <input id="sel-vision-model-custom" type="text" placeholder="или введи vision-модель вручную" spellcheck="false" />
+                <div id="vision-apikey-row" class="settings-row hidden">
+                  <label>API-ключ</label>
+                  <input id="sel-vision-apikey" type="password" spellcheck="false" autocomplete="off" placeholder="токен провайдера" />
+                </div>
+                <div id="vision-model-select-row" class="settings-row">
+                  <label>Модель</label>
+                  <div class="model-row">
+                    <select id="sel-vision-model"></select>
+                    <button id="refresh-vision-models" class="btn-mini" type="button" title="Обновить">⟳</button>
+                  </div>
+                </div>
+                <div id="vision-model-custom-row" class="settings-row">
+                  <input id="sel-vision-model-custom" type="text" placeholder="или введи vision-модель вручную" spellcheck="false" />
+                </div>
+                <div id="vision-ollama-block" class="ollama-block hidden">
+                  <div class="ollama-head">
+                    <span>Ollama</span>
+                    <span id="vision-ollama-state" class="ollama-state">проверка…</span>
+                  </div>
+                  <div id="vision-ollama-recommended" class="ollama-list"></div>
+                  <div class="ollama-add">
+                    <input id="vision-ollama-custom-name" type="text" placeholder="Добавить модель" spellcheck="false" />
+                    <button id="vision-ollama-add" class="btn-mini" type="button" title="Добавить">+</button>
+                    <button id="vision-ollama-search" class="btn-mini" type="button" title="Открыть каталог Ollama">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+                    </button>
+                  </div>
+                  <span id="vision-ollama-status" class="ollama-status"></span>
+                </div>
               </div>
             </div>
             <div class="settings-actions">
@@ -245,6 +287,9 @@
 
     <div id="ctx-menu" class="ctx-menu hidden" role="menu">
       <button type="button" class="ctx-item" data-action="copy">Копировать</button>
+      <button type="button" class="ctx-item" data-action="cut" hidden>Вырезать</button>
+      <button type="button" class="ctx-item" data-action="paste" hidden>Вставить</button>
+      <button type="button" class="ctx-item" data-action="select-all" hidden>Выделить всё</button>
       <button type="button" class="ctx-item" data-action="reply">Ответить на фрагмент</button>
     </div>
     <script src="/app.js"></script>

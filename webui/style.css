@@ -202,7 +202,7 @@ button { font: inherit; color: inherit; }
   box-shadow: 0 6px 24px rgba(0,0,0,0.45);
 }
 .settings-panel.hidden { display: none; }
-.settings-row.hidden, #vision-block.hidden { display: none; }
+.settings-row.hidden, #vision-block.hidden, .settings-edit.hidden, .ollama-block.hidden { display: none; }
 .settings-row.settings-section { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .settings-row.settings-section label { color: var(--text); font-size: 11px; }
 .settings-row { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
@@ -218,6 +218,36 @@ button { font: inherit; color: inherit; }
 .settings-row select:focus, .settings-row input:focus { border-color: var(--orange); }
 .model-row { display: flex; gap: 6px; min-width: 0; }
 .model-row select { flex: 1 1 0; min-width: 0; }
+.settings-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-summary-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 6px;
+}
+.settings-summary {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.35;
+  min-width: 0;
+  overflow: hidden;
+  padding: 7px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.btn-summary {
+  min-width: 92px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
 
 .btn-mini {
   background: var(--bg-2); color: var(--muted); border: 1px solid var(--border);
@@ -225,11 +255,6 @@ button { font: inherit; color: inherit; }
 }
 .btn-mini:hover { color: var(--accent-text); border-color: var(--orange); }
 
-.safety-row {
-  padding: 8px 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-}
 .switch {
   width: 100%;
   height: 34px;
@@ -294,6 +319,128 @@ button { font: inherit; color: inherit; }
   border-radius: 6px; padding: 6px 12px; cursor: pointer;
 }
 .btn-ghost:hover { color: var(--text); border-color: var(--border-2); }
+
+.ollama-block {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+}
+.ollama-head,
+.ollama-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ollama-head {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.ollama-state,
+.ollama-status {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ollama-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 116px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.ollama-row {
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 6px;
+}
+.ollama-row.selected {
+  border-color: var(--orange);
+}
+.ollama-name {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  font: inherit;
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ollama-name span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ollama-size {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  justify-self: end;
+}
+.ollama-row.installed .ollama-name { color: #4ade80; }
+.ollama-action {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--muted);
+  cursor: pointer;
+  height: 24px;
+  line-height: 0;
+  padding: 0;
+}
+.ollama-row:hover,
+.ollama-action:hover {
+  border-color: var(--orange);
+  color: var(--accent-text);
+}
+.ollama-add {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) 30px 30px;
+}
+.ollama-add .btn-mini {
+  display: grid;
+  place-items: center;
+}
+.ollama-add input {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 12px;
+  min-width: 0;
+  padding: 6px 8px;
+}
 
 /* ── Messages ───────────────────────────────────────────────────── */
 .messages {

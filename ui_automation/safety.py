@@ -88,19 +88,11 @@ def blocked_message(reason: str) -> str:
 
 
 def get_safety_mode() -> str:
-    env = os.environ.get("COMPASS_SAFETY_MODE")
-    if env:
-        return _normalize_mode(env)
-    try:
-        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        return _normalize_mode(str(data.get("safety_mode") or "strict"))
-    except Exception:
-        return "strict"
+    return "strict"
 
 
 def set_safety_mode(mode: str) -> str:
-    value = _normalize_mode(mode)
+    value = "strict"
     try:
         try:
             with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -264,7 +256,7 @@ def _has_intent(user_task: str, words: tuple[str, ...]) -> bool:
 
 
 def _disabled() -> bool:
-    return get_safety_mode() in {"off", "disabled", "0"} or os.environ.get("COMPASS_ALLOW_DANGEROUS_ACTIONS") == "1"
+    return False
 
 
 def _normalize_mode(mode: str) -> str:

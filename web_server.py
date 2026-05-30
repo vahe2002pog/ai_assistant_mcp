@@ -836,16 +836,23 @@ class Handler(BaseHTTPRequestHandler):
             providers = []
             for k, v in _llm.PROVIDERS.items():
                 saved = _llm.get_provider_ui_settings(k)
+                api_key_set = _db.provider_key_has(k)
+                model_saved = bool((saved.get("model") or "").strip())
+                local_ollama = k == "ollama"
                 providers.append({
                     "id": k,
                     "label": v["label"],
                     "base_url": saved.get("base_url") or v["base_url"],
                     "model": saved.get("model") or "",
                     "vision_model": saved.get("vision_model") or "",
-                    "api_key_set": _db.provider_key_has(k),
+                    "api_key_set": api_key_set,
+                    "needs_key": k not in ("llamacpp", "ollama", "ollama_ui"),
+                    "local_ollama": local_ollama,
+                    "external_ollama": k == "ollama_ui",
+                    "configured": local_ollama or (model_saved and (api_key_set or k in ("llamacpp", "ollama_ui", "custom"))),
                 })
             safe_cfg = dict(cfg)
-            safe_cfg["api_key_set"] = bool(cfg.get("api_key"))
+            safe_cfg["api_key_set"] = _db.provider_key_has(cfg.get("provider", ""))
             safe_cfg.pop("api_key", None)
             vp = (cfg.get("vision_provider") or "").strip()
             safe_cfg["vision_api_key_set"] = _db.provider_key_has(vp) if vp else safe_cfg["api_key_set"]
@@ -873,14 +880,19 @@ class Handler(BaseHTTPRequestHandler):
                     api_key, _folder = _db.provider_key_get(provider)
                 except Exception:
                     api_key = None
-            groups = _llm.list_model_groups(base_url=base, api_key=api_key)
+            groups = None if provider == "ollama" else _llm.list_model_groups(base_url=base, api_key=api_key)
             if groups:
                 # groups[i]["models"] — список dict'ов {id, vision}
                 flat = [m for g in groups for m in g["models"]]
                 self._send_json(200, {"models": flat, "groups": groups})
             else:
-                models = _llm.list_models(base_url=base, api_key=api_key)
+                models = _llm.list_models(base_url=base, api_key=api_key, provider=provider)
                 self._send_json(200, {"models": models})
+            return
+
+        if path == "/api/ollama/status":
+            from ui_automation import ollama_manager as _ollama
+            self._send_json(200, _ollama.snapshot())
             return
 
         if path == "/api/events":
@@ -1092,14 +1104,33 @@ class Handler(BaseHTTPRequestHandler):
             if safety_mode is not None:
                 _safety.set_safety_mode(str(safety_mode))
             safe_cfg = dict(cfg)
-            safe_cfg["api_key_set"] = bool(cfg.get("api_key"))
             safe_cfg.pop("api_key", None)
             import database as _db
+            safe_cfg["api_key_set"] = _db.provider_key_has(cfg.get("provider", ""))
             vp = (cfg.get("vision_provider") or "").strip()
             safe_cfg["vision_api_key_set"] = _db.provider_key_has(vp) if vp else safe_cfg["api_key_set"]
             safe_cfg["safety_mode"] = _safety.get_safety_mode()
             BROKER.emit("config_updated", safe_cfg)
             self._send_json(200, {"config": safe_cfg})
+            return
+
+        if path == "/api/ollama/pull":
+            from ui_automation import ollama_manager as _ollama
+            req = self._read_json() or {}
+            res = _ollama.pull_model(req.get("model") or "")
+            self._send_json(200 if res.get("ok") else 409, res)
+            return
+
+        if path == "/api/ollama/cancel":
+            from ui_automation import ollama_manager as _ollama
+            self._send_json(200, _ollama.cancel_pull())
+            return
+
+        if path == "/api/ollama/delete":
+            from ui_automation import ollama_manager as _ollama
+            req = self._read_json() or {}
+            res = _ollama.delete_model(req.get("model") or "")
+            self._send_json(200 if res.get("ok") else 409, res)
             return
 
         if path == "/api/cancel":
@@ -1454,6 +1485,20 @@ def _start_server(port: int) -> tuple[ThreadingHTTPServer, str]:
     port = _pick_port(port)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
+    try:
+        from ui_automation import llm_config as _llm
+        from ui_automation import ollama_manager as _ollama
+        cfg = _llm.get()
+        needs_ollama = (
+            cfg.get("provider") == "ollama"
+            or (cfg.get("vision_provider") or "").strip() == "ollama"
+        )
+        if needs_ollama:
+            _ollama.ensure_running()
+        else:
+            _ollama.stop_if_owned()
+    except Exception:
+        pass
     _ensure_voice_daemon(url)
     print(f"[web] Компас запущен: {url}")
     return httpd, url
@@ -1566,6 +1611,11 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
             except Exception as e:
                 print(f"[voice] daemon stop failed: {e}")
             try:
+                from ui_automation import ollama_manager as _ollama
+                _ollama.stop_if_owned()
+            except Exception as e:
+                print(f"[ollama] stop failed: {e}")
+            try:
                 if state["tray"] is not None:
                     state["tray"].stop()
             except Exception:
@@ -1638,6 +1688,11 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
         if 'state' in locals() and state.get("exiting"):
             try:
                 _stop_voice_daemon(8766)
+            except Exception:
+                pass
+            try:
+                from ui_automation import ollama_manager as _ollama
+                _ollama.stop_if_owned()
             except Exception:
                 pass
             os._exit(0)
