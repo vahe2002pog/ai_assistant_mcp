@@ -25,6 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VOICE_DIR = os.path.join(ROOT, "voice")
 WHISPER_DIR = os.path.join(ROOT, "utils", "whisper")
 WHISPER_CLI = os.path.join(WHISPER_DIR, "whisper-cli.exe")
+WHISPER_RELEASE_CLI = os.path.join(WHISPER_DIR, "Release", "whisper-cli.exe")
 WHISPER_MODEL = os.path.join(VOICE_DIR, "models", "ggml-small.bin")
 WAKE_WORD_DIR = os.path.join(VOICE_DIR, "wake-word")
 WAKE_WORD_TFLITE = os.path.join(WAKE_WORD_DIR, "wake_word_model.tflite")
@@ -40,7 +41,7 @@ WAKE_WINDOW_SECONDS = 1.0
 WAKE_WINDOW_SAMPLES = int(DEFAULT_SAMPLE_RATE * WAKE_WINDOW_SECONDS)
 WAKE_STEP_MS = 250
 WAKE_BLOCK_SAMPLES = int(DEFAULT_SAMPLE_RATE * WAKE_STEP_MS / 1000)
-WAKE_THRESHOLD = float(os.environ.get("COMPASS_WAKE_THRESHOLD") or "0.7")
+WAKE_THRESHOLD = float(os.environ.get("COMPASS_WAKE_THRESHOLD") or "0.6")
 WAKE_COOLDOWN_SEC = float(os.environ.get("COMPASS_WAKE_COOLDOWN") or "1.5")
 WAKE_REQUIRED_HITS = int(os.environ.get("COMPASS_WAKE_REQUIRED_HITS") or "2")
 WAKE_SMOOTHING_WINDOWS = int(os.environ.get("COMPASS_WAKE_SMOOTHING_WINDOWS") or "2")
@@ -101,6 +102,15 @@ class EventBroker:
 
 BROKER = EventBroker()
 SERVICE: Optional["VoiceService"] = None
+_STDIO_DEVNULL_HANDLES = []
+
+
+def _ensure_stdio_streams() -> None:
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is None:
+            stream = open(os.devnull, "w", encoding="utf-8", errors="replace")
+            setattr(sys, name, stream)
+            _STDIO_DEVNULL_HANDLES.append(stream)
 
 
 def _exit_process_soon(delay: float = 0.25) -> None:
@@ -273,14 +283,23 @@ def _record_until_silence(stop_event: threading.Event, silence_s: float = 1.3,
     return path, True
 
 
+def _whisper_cli_path() -> str:
+    if os.path.isfile(WHISPER_CLI):
+        return WHISPER_CLI
+    if os.path.isfile(WHISPER_RELEASE_CLI):
+        return WHISPER_RELEASE_CLI
+    return WHISPER_CLI
+
+
 def _transcribe(path: str) -> str:
-    if not os.path.isfile(WHISPER_CLI):
-        raise RuntimeError(f"whisper-cli not found: {WHISPER_CLI}")
+    whisper_cli = _whisper_cli_path()
+    if not os.path.isfile(whisper_cli):
+        raise RuntimeError(f"whisper-cli not found: {whisper_cli}")
     if not os.path.isfile(WHISPER_MODEL):
         raise RuntimeError(f"Whisper model not found: {WHISPER_MODEL}")
 
     base_cmd = [
-        WHISPER_CLI,
+        whisper_cli,
         "-m", WHISPER_MODEL,
         "-l", "ru",
         "-nt",
@@ -290,7 +309,7 @@ def _transcribe(path: str) -> str:
     for cmd in (base_cmd + ["--vad"], base_cmd):
         proc = subprocess.run(
             cmd,
-            cwd=WHISPER_DIR,
+            cwd=os.path.dirname(whisper_cli) or WHISPER_DIR,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1597,6 +1616,84 @@ class SileroTTS:
         "y": "\u0443\u0430\u0439",
         "z": "\u0437\u0435\u0434",
     }
+    _DIGIT_WORDS = {
+        "0": "\u043d\u043e\u043b\u044c",
+        "1": "\u043e\u0434\u0438\u043d",
+        "2": "\u0434\u0432\u0430",
+        "3": "\u0442\u0440\u0438",
+        "4": "\u0447\u0435\u0442\u044b\u0440\u0435",
+        "5": "\u043f\u044f\u0442\u044c",
+        "6": "\u0448\u0435\u0441\u0442\u044c",
+        "7": "\u0441\u0435\u043c\u044c",
+        "8": "\u0432\u043e\u0441\u0435\u043c\u044c",
+        "9": "\u0434\u0435\u0432\u044f\u0442\u044c",
+    }
+    _ONES_MALE = (
+        "",
+        "\u043e\u0434\u0438\u043d",
+        "\u0434\u0432\u0430",
+        "\u0442\u0440\u0438",
+        "\u0447\u0435\u0442\u044b\u0440\u0435",
+        "\u043f\u044f\u0442\u044c",
+        "\u0448\u0435\u0441\u0442\u044c",
+        "\u0441\u0435\u043c\u044c",
+        "\u0432\u043e\u0441\u0435\u043c\u044c",
+        "\u0434\u0435\u0432\u044f\u0442\u044c",
+    )
+    _ONES_FEMALE = (
+        "",
+        "\u043e\u0434\u043d\u0430",
+        "\u0434\u0432\u0435",
+        "\u0442\u0440\u0438",
+        "\u0447\u0435\u0442\u044b\u0440\u0435",
+        "\u043f\u044f\u0442\u044c",
+        "\u0448\u0435\u0441\u0442\u044c",
+        "\u0441\u0435\u043c\u044c",
+        "\u0432\u043e\u0441\u0435\u043c\u044c",
+        "\u0434\u0435\u0432\u044f\u0442\u044c",
+    )
+    _TEENS = (
+        "\u0434\u0435\u0441\u044f\u0442\u044c",
+        "\u043e\u0434\u0438\u043d\u043d\u0430\u0434\u0446\u0430\u0442\u044c",
+        "\u0434\u0432\u0435\u043d\u0430\u0434\u0446\u0430\u0442\u044c",
+        "\u0442\u0440\u0438\u043d\u0430\u0434\u0446\u0430\u0442\u044c",
+        "\u0447\u0435\u0442\u044b\u0440\u043d\u0430\u0434\u0446\u0430\u0442\u044c",
+        "\u043f\u044f\u0442\u043d\u0430\u0434\u0446\u0430\u0442\u044c",
+        "\u0448\u0435\u0441\u0442\u043d\u0430\u0434\u0446\u0430\u0442\u044c",
+        "\u0441\u0435\u043c\u043d\u0430\u0434\u0446\u0430\u0442\u044c",
+        "\u0432\u043e\u0441\u0435\u043c\u043d\u0430\u0434\u0446\u0430\u0442\u044c",
+        "\u0434\u0435\u0432\u044f\u0442\u043d\u0430\u0434\u0446\u0430\u0442\u044c",
+    )
+    _TENS = (
+        "",
+        "",
+        "\u0434\u0432\u0430\u0434\u0446\u0430\u0442\u044c",
+        "\u0442\u0440\u0438\u0434\u0446\u0430\u0442\u044c",
+        "\u0441\u043e\u0440\u043e\u043a",
+        "\u043f\u044f\u0442\u044c\u0434\u0435\u0441\u044f\u0442",
+        "\u0448\u0435\u0441\u0442\u044c\u0434\u0435\u0441\u044f\u0442",
+        "\u0441\u0435\u043c\u044c\u0434\u0435\u0441\u044f\u0442",
+        "\u0432\u043e\u0441\u0435\u043c\u044c\u0434\u0435\u0441\u044f\u0442",
+        "\u0434\u0435\u0432\u044f\u043d\u043e\u0441\u0442\u043e",
+    )
+    _HUNDREDS = (
+        "",
+        "\u0441\u0442\u043e",
+        "\u0434\u0432\u0435\u0441\u0442\u0438",
+        "\u0442\u0440\u0438\u0441\u0442\u0430",
+        "\u0447\u0435\u0442\u044b\u0440\u0435\u0441\u0442\u0430",
+        "\u043f\u044f\u0442\u044c\u0441\u043e\u0442",
+        "\u0448\u0435\u0441\u0442\u044c\u0441\u043e\u0442",
+        "\u0441\u0435\u043c\u044c\u0441\u043e\u0442",
+        "\u0432\u043e\u0441\u0435\u043c\u044c\u0441\u043e\u0442",
+        "\u0434\u0435\u0432\u044f\u0442\u044c\u0441\u043e\u0442",
+    )
+    _SCALES = (
+        ("", "", "", "male"),
+        ("\u0442\u044b\u0441\u044f\u0447\u0430", "\u0442\u044b\u0441\u044f\u0447\u0438", "\u0442\u044b\u0441\u044f\u0447", "female"),
+        ("\u043c\u0438\u043b\u043b\u0438\u043e\u043d", "\u043c\u0438\u043b\u043b\u0438\u043e\u043d\u0430", "\u043c\u0438\u043b\u043b\u0438\u043e\u043d\u043e\u0432", "male"),
+        ("\u043c\u0438\u043b\u043b\u0438\u0430\u0440\u0434", "\u043c\u0438\u043b\u043b\u0438\u0430\u0440\u0434\u0430", "\u043c\u0438\u043b\u043b\u0438\u0430\u0440\u0434\u043e\u0432", "male"),
+    )
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -1644,6 +1741,7 @@ class SileroTTS:
         if "ru" in self._models:
             return self._models["ru"]
         cfg = self._CONFIG
+        _ensure_stdio_streams()
         import torch
         model, _example = torch.hub.load(
             repo_or_dir="snakers4/silero-models",
@@ -1725,12 +1823,107 @@ class SileroTTS:
 
     def _prepare_tts_text(self, text: str) -> str:
         text = re.sub(r"\[HostAgent\]\s*voice:\s*", "", text, flags=re.IGNORECASE)
+        text = self._normalize_numbers(text)
         text = re.sub(
             r"[A-Za-z]+(?:[-'][A-Za-z]+)*",
             lambda match: self._latin_to_cyrillic(match.group(0)),
             text,
         )
         return re.sub(r"\s+", " ", text).strip()
+
+    def _normalize_numbers(self, text: str) -> str:
+        letter = r"A-Za-z\u0410-\u042f\u0430-\u044f\u0401\u0451_"
+        text = re.sub(
+            rf"(?<![{letter}])([+-]?\d+)[,.](\d+)(?![{letter}])",
+            lambda match: self._decimal_to_words(match.group(1), match.group(2)),
+            text,
+        )
+        text = re.sub(
+            rf"(?<![{letter}])([+-]?\d+)(?![{letter}])",
+            lambda match: self._integer_token_to_words(match.group(1)),
+            text,
+        )
+        return text
+
+    def _decimal_to_words(self, integer_part: str, fraction_part: str) -> str:
+        integer_words = self._integer_token_to_words(integer_part)
+        fraction_words = self._digits_to_words(fraction_part)
+        return f"{integer_words} \u0446\u0435\u043b\u044b\u0445 {fraction_words}"
+
+    def _integer_token_to_words(self, token: str) -> str:
+        sign = ""
+        value = token
+        if value.startswith(("+", "-")):
+            if value.startswith("-"):
+                sign = "\u043c\u0438\u043d\u0443\u0441 "
+            value = value[1:]
+        if not value:
+            return token
+        if len(value) > 1 and value.startswith("0"):
+            return sign + self._digits_to_words(value)
+        if len(value) > 12:
+            return sign + self._digits_to_words(value)
+        try:
+            return sign + self._integer_to_words(int(value))
+        except Exception:
+            return token
+
+    def _digits_to_words(self, value: str) -> str:
+        return " ".join(self._DIGIT_WORDS.get(ch, ch) for ch in value)
+
+    def _integer_to_words(self, value: int) -> str:
+        if value == 0:
+            return self._DIGIT_WORDS["0"]
+        if value < 0:
+            return "\u043c\u0438\u043d\u0443\u0441 " + self._integer_to_words(abs(value))
+
+        groups = []
+        while value:
+            groups.append(value % 1000)
+            value //= 1000
+
+        words: list[str] = []
+        for idx in range(len(groups) - 1, -1, -1):
+            group = groups[idx]
+            if group == 0:
+                continue
+            try:
+                one, few, many, gender = self._SCALES[idx]
+            except IndexError:
+                return self._digits_to_words(str(value))
+            words.extend(self._chunk_to_words(group, gender))
+            if idx > 0:
+                words.append(self._plural_form(group, one, few, many))
+        return " ".join(part for part in words if part)
+
+    def _chunk_to_words(self, value: int, gender: str = "male") -> list[str]:
+        words: list[str] = []
+        hundreds = value // 100
+        if hundreds:
+            words.append(self._HUNDREDS[hundreds])
+        rest = value % 100
+        if 10 <= rest <= 19:
+            words.append(self._TEENS[rest - 10])
+            return words
+        tens = rest // 10
+        ones = rest % 10
+        if tens:
+            words.append(self._TENS[tens])
+        if ones:
+            words.append((self._ONES_FEMALE if gender == "female" else self._ONES_MALE)[ones])
+        return words
+
+    @staticmethod
+    def _plural_form(value: int, one: str, few: str, many: str) -> str:
+        last_two = value % 100
+        last = value % 10
+        if 11 <= last_two <= 14:
+            return many
+        if last == 1:
+            return one
+        if 2 <= last <= 4:
+            return few
+        return many
 
     def _latin_to_cyrillic(self, word: str) -> str:
         clean = re.sub(r"[^A-Za-z]", "", word)

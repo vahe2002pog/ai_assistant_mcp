@@ -2,6 +2,7 @@ import importlib
 import functools
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Optional, Any, Dict
@@ -151,6 +152,11 @@ def append_string_to_file(file_path: str, string: str) -> None:
 
 _EMB_CACHE: Dict[str, Any] = {}
 _EMB_LOCK = threading.Lock()
+_STDIO_DEVNULL_HANDLES = []
+DEFAULT_EMBEDDING_MODEL = os.environ.get(
+    "COMPASS_EMBEDDING_MODEL",
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+)
 
 
 # Отключаем шумные прогресс-бары/логи до первого импорта transformers.
@@ -171,8 +177,35 @@ def _silence_st_logs() -> None:
     os.environ.setdefault("TQDM_DISABLE", "1")
 
 
+def _ensure_stdio_streams() -> None:
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is None:
+            stream = open(os.devnull, "w", encoding="utf-8", errors="replace")
+            setattr(sys, name, stream)
+            _STDIO_DEVNULL_HANDLES.append(stream)
+
+
+def _embedding_cache_dir() -> Path:
+    override = os.environ.get("COMPASS_HF_HOME")
+    if override:
+        return Path(override)
+    program_data = os.environ.get("PROGRAMDATA")
+    if getattr(sys, "frozen", False) and program_data:
+        return Path(program_data) / "Compass" / "hf_cache"
+    return Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+
+
+def _prepare_embedding_cache() -> Path:
+    cache_dir = _embedding_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(cache_dir))
+    os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(cache_dir / "sentence_transformers"))
+    os.environ.setdefault("TRANSFORMERS_CACHE", str(cache_dir / "transformers"))
+    return cache_dir
+
+
 def get_hugginface_embedding(
-    model_name: str = "sentence-transformers/all-mpnet-base-v2",
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
 ):
     """
     Возвращает объект для получения эмбеддингов Hugging Face.
@@ -186,13 +219,29 @@ def get_hugginface_embedding(
         cached = _EMB_CACHE.get(model_name)
         if cached is not None:
             return cached
+        _ensure_stdio_streams()
+        cache_dir = _prepare_embedding_cache()
         _silence_st_logs()
         from langchain_huggingface import HuggingFaceEmbeddings
-        model_kwargs = {}
-        cache_root = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+        model_kwargs = {"device": "cpu"}
+        cache_root = cache_dir / "hub"
         cache_name = "models--" + model_name.replace("/", "--")
         if (cache_root / cache_name).exists():
             model_kwargs["local_files_only"] = True
-        inst = HuggingFaceEmbeddings(model_name=model_name, model_kwargs=model_kwargs)
+        inst = HuggingFaceEmbeddings(
+            model_name=model_name,
+            cache_folder=str(cache_dir),
+            model_kwargs=model_kwargs,
+            encode_kwargs={"normalize_embeddings": True},
+        )
         _EMB_CACHE[model_name] = inst
         return inst
+
+
+def get_huggingface_embedding(model_name: str = DEFAULT_EMBEDDING_MODEL):
+    return get_hugginface_embedding(model_name)
+
+
+def preload_huggingface_embedding() -> None:
+    embeddings = get_hugginface_embedding()
+    embeddings.embed_query("проверка индексации RAG")

@@ -25,6 +25,43 @@ API:
 """
 from __future__ import annotations
 
+from pathlib import Path as _CompassPath
+
+
+def _patch_faiss_write_index_parent_dir() -> None:
+    try:
+        import faiss as _faiss
+    except Exception:
+        return
+    if getattr(_faiss, "_compass_write_index_patched", False):
+        return
+    _original_write_index = _faiss.write_index
+
+    def _write_index_with_parent_dir(index, file_name, *args, **kwargs):
+        try:
+            _CompassPath(str(file_name)).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return _original_write_index(index, file_name, *args, **kwargs)
+
+    _faiss.write_index = _write_index_with_parent_dir
+    _faiss._compass_write_index_patched = True
+
+
+_patch_faiss_write_index_parent_dir()
+
+
+def _default_vault_dir() -> _CompassPath:
+    import os
+
+    explicit = os.environ.get("COMPASS_VAULT_DIR")
+    if explicit:
+        return _CompassPath(explicit)
+    program_data = os.environ.get("ProgramData")
+    if program_data:
+        return _CompassPath(program_data) / "Compass" / "vault"
+    return _CompassPath.home() / "AppData" / "Local" / "Compass" / "vault"
+
 import json
 import os
 import re
@@ -296,7 +333,7 @@ def _save_meta(meta: dict) -> None:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
-def reindex(full: bool = False) -> int:
+def reindex(full: bool = False, strict: bool = False) -> int:
     """Строит/обновляет FAISS-индекс. Возвращает количество проиндексированных чанков.
 
     full=True — пересобирает с нуля.
@@ -307,10 +344,18 @@ def reindex(full: bool = False) -> int:
         from langchain_community.vectorstores import FAISS
         from ui_automation.utils import get_hugginface_embedding
     except Exception as e:
+        if strict:
+            raise RuntimeError(f"RAG embeddings недоступны: {e}") from e
         print(f"[vault] reindex skipped: {e}", flush=True)
         return 0
 
-    embeddings = get_hugginface_embedding()
+    try:
+        embeddings = get_hugginface_embedding()
+    except Exception as e:
+        if strict:
+            raise RuntimeError(f"Не удалось загрузить модель эмбеддингов RAG: {e}") from e
+        print(f"[vault] reindex skipped: {e}", flush=True)
+        return 0
     index_file = os.path.join(INDEX_DIR, "index.faiss")
     meta = {} if full else _load_meta()
 
@@ -713,10 +758,7 @@ def save_document(original_path: str, extracted_text: str, tags: Optional[list] 
     body = "## Извлечённый текст\n\n" + (extracted_text.strip() or "_(пусто)_") + "\n"
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(_dump_frontmatter(fm) + "\n" + body)
-    try:
-        reindex(full=False)
-    except Exception:
-        pass
+    reindex(full=False, strict=True)
     return md_path
 
 

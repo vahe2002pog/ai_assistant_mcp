@@ -1187,27 +1187,40 @@ function providerMeta(id) {
   return providers.find(p => p.id === id) || {};
 }
 
+function savedModelForProvider(id) {
+  const p = providerMeta(id);
+  if (p.model) return p.model;
+  if (currentCfg && currentCfg.provider === id) return currentCfg.model || "";
+  return "";
+}
+
+function savedVisionModelForProvider(id) {
+  const p = providerMeta(id);
+  if (p.vision_model) return p.vision_model;
+  if (currentCfg && currentCfg.vision_provider === id) return currentCfg.vision_model || "";
+  return "";
+}
+
 function providerNeedsEdit(id, p = providerMeta(id)) {
-  if (id === "ollama") return !(p.model || (currentCfg && currentCfg.provider === "ollama" && currentCfg.model));
-  const hasModel = !!(p.model || (currentCfg && currentCfg.provider === id && currentCfg.model));
+  if (id === "ollama") return !savedModelForProvider("ollama");
+  const hasModel = !!savedModelForProvider(id);
   const hasKey = !!p.api_key_set || !p.needs_key;
   return !hasModel || !hasKey;
 }
 
 function visionProviderNeedsEdit(id, p = providerMeta(id)) {
   if (!id) return false;
-  const hasModel = !!(p.vision_model || (currentCfg && currentCfg.vision_provider === id && currentCfg.vision_model));
+  const hasModel = !!savedVisionModelForProvider(id);
   const hasKey = !!p.api_key_set || !p.needs_key;
   return !hasModel || !hasKey;
 }
 
 function updateSummaries() {
-  const p = providerMeta(selProvider.value);
-  const model = (selModelCustom.value.trim() || selModel.value || p.model || (currentCfg && currentCfg.model) || "").trim();
+  const model = (selModelCustom.value.trim() || selModel.value || savedModelForProvider(selProvider.value) || "").trim();
   mainModelSummary.textContent = model ? `Модель: ${model}` : "Модель не выбрана";
   if (visionEnabled) {
     const vp = providerMeta(selVisionProvider.value);
-    const vm = (selVisionModelCustom.value.trim() || selVisionModel.value || (currentCfg && currentCfg.vision_model) || vp.vision_model || "").trim();
+    const vm = (selVisionModelCustom.value.trim() || selVisionModel.value || savedVisionModelForProvider(selVisionProvider.value) || "").trim();
     const label = selVisionProvider.value ? (vp.label || selVisionProvider.value) : "как основной";
     visionModelSummary.textContent = vm ? `${label}: ${vm}` : `${label}: модель не выбрана`;
   }
@@ -1364,7 +1377,7 @@ async function refreshModels() {
       selModel.innerHTML = list.map(_renderOpt).join("");
     }
     const ids = list.map(m => _normModel(m).id);
-    const desiredModel = (selModelCustom.value.trim() || (currentCfg && currentCfg.model) || "").trim();
+    const desiredModel = (selModelCustom.value.trim() || savedModelForProvider(selProvider.value) || "").trim();
     if (desiredModel && ids.includes(desiredModel)) {
       selModel.value = desiredModel;
       selModelCustom.value = "";
@@ -1427,7 +1440,7 @@ function renderOllamaStatus(d) {
     renderOllamaRows(
       ollamaRecommended,
       d,
-      (selModel.value || (currentCfg && currentCfg.model) || "").trim(),
+      (selModel.value || savedModelForProvider("ollama") || "").trim(),
       (model) => {
         selModelCustom.value = "";
         selModel.value = model;
@@ -1443,7 +1456,7 @@ function renderOllamaStatus(d) {
     renderOllamaRows(
       visionOllamaRecommended,
       d,
-      (selVisionModelCustom.value.trim() || selVisionModel.value || (currentCfg && currentCfg.vision_model) || "").trim(),
+      (selVisionModelCustom.value.trim() || selVisionModel.value || savedVisionModelForProvider("ollama") || "").trim(),
       (model) => {
         selVisionModel.value = "";
         selVisionModelCustom.value = model;
@@ -1558,8 +1571,9 @@ async function refreshVisionModels() {
 selProvider.addEventListener("change", () => {
   const p = providers.find(x => x.id === selProvider.value);
   if (p) selBase.value = p.base_url;
-  selModelCustom.value = (p && p.model) ? p.model : "";
-  if (p && p.model) selModel.value = p.model;
+  const savedModel = savedModelForProvider(selProvider.value);
+  selModelCustom.value = savedModel;
+  selModel.value = savedModel;
   selApiKey.value = "";
   selApiKey.placeholder = (p && p.api_key_set)
     ? "••• ключ сохранён (введите, чтобы заменить)"
@@ -1606,6 +1620,9 @@ selApiKey.addEventListener("change", () => {
 
 selVisionProvider.addEventListener("change", () => {
   const vp = selVisionProvider.value;
+  const savedVisionModel = savedVisionModelForProvider(vp);
+  selVisionModelCustom.value = savedVisionModel;
+  selVisionModel.value = savedVisionModel;
   if (vp) {
     const p = providers.find(x => x.id === vp);
     if (p) selVisionBase.value = p.base_url;
@@ -1672,8 +1689,8 @@ visionEditBtn.addEventListener("click", async () => {
 });
 
 async function saveSettings({ closePanel = true } = {}) {
-  const model = (selModelCustom.value.trim() || selModel.value || (currentCfg && currentCfg.model) || "").trim();
-  const visionModel = (selVisionModelCustom.value.trim() || selVisionModel.value || (currentCfg && currentCfg.vision_model) || "").trim();
+  const model = (selModelCustom.value.trim() || selModel.value || savedModelForProvider(selProvider.value) || "").trim();
+  const visionModel = (selVisionModelCustom.value.trim() || selVisionModel.value || savedVisionModelForProvider(selVisionProvider.value) || "").trim();
   const body = {
     provider: selProvider.value,
     base_url: selProvider.value === "ollama" ? "" : selBase.value.trim(),

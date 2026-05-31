@@ -828,6 +828,11 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if path == "/api/window/show":
+            _show_app_window()
+            self._send_json(200, {"ok": True})
+            return
+
         if path == "/api/config":
             from ui_automation import llm_config as _llm
             from ui_automation import safety as _safety
@@ -846,10 +851,10 @@ class Handler(BaseHTTPRequestHandler):
                     "model": saved.get("model") or "",
                     "vision_model": saved.get("vision_model") or "",
                     "api_key_set": api_key_set,
-                    "needs_key": k not in ("llamacpp", "ollama", "ollama_ui"),
+                    "needs_key": k not in ("ollama", "ollama_ui"),
                     "local_ollama": local_ollama,
                     "external_ollama": k == "ollama_ui",
-                    "configured": local_ollama or (model_saved and (api_key_set or k in ("llamacpp", "ollama_ui", "custom"))),
+                    "configured": local_ollama or (model_saved and (api_key_set or k in ("ollama_ui", "custom"))),
                 })
             safe_cfg = dict(cfg)
             safe_cfg["api_key_set"] = _db.provider_key_has(cfg.get("provider", ""))
@@ -970,6 +975,11 @@ class Handler(BaseHTTPRequestHandler):
     # ── POST ───────────────────────────────────────────────────────────
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+
+        if path == "/api/window/show":
+            _show_app_window()
+            self._send_json(200, {"ok": True})
+            return
         import database as _db
 
         if path == "/api/chat":
@@ -1207,7 +1217,11 @@ class Handler(BaseHTTPRequestHandler):
             with open(target, "wb") as f:
                 f.write(raw)
             text = _extract_doc_text(target, full=True)
-            md_path = _vm.save_document(target, text or "", tags=tags or ["document"])
+            try:
+                md_path = _vm.save_document(target, text or "", tags=tags or ["document"])
+            except Exception as e:
+                self._send_json(500, {"error": f"Не удалось добавить документ в RAG: {e}"})
+                return
             self._send_json(200, {"ok": True, "path": target, "note": md_path,
                                   "preview": (text or "")[:400]})
             return
@@ -1380,6 +1394,7 @@ def _stop_stale_voice_daemon(port: int) -> bool:
 
     stopped = False
     main_path = os.path.abspath(os.path.join(_ROOT, "main.py")).lower()
+    frozen_exe = os.path.abspath(sys.executable).lower() if getattr(sys, "frozen", False) else ""
     for proc in psutil.process_iter(["pid", "cmdline"]):
         try:
             cmdline = [str(part) for part in (proc.info.get("cmdline") or [])]
@@ -1391,7 +1406,11 @@ def _stop_stale_voice_daemon(port: int) -> bool:
         joined = " ".join(lowered)
         if "--voice-daemon" not in lowered:
             continue
-        if main_path not in {os.path.abspath(part).lower() for part in cmdline if part.lower().endswith("main.py")}:
+        main_py_match = main_path in {
+            os.path.abspath(part).lower() for part in cmdline if part.lower().endswith("main.py")
+        }
+        frozen_match = bool(frozen_exe and os.path.abspath(cmdline[0]).lower() == frozen_exe)
+        if not main_py_match and not frozen_match:
             if "main.py" not in joined:
                 continue
         if "--voice-port" in lowered:
@@ -1465,9 +1484,18 @@ def _ensure_voice_daemon(chat_url: str, port: int = 8766) -> None:
         log_path = os.path.join(_ROOT, "voice", "voice-daemon.log")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         log_file = open(log_path, "ab", buffering=0)
+        if getattr(sys, "frozen", False):
+            daemon_cmd = [
+                sys.executable,
+                "--voice-daemon", "--voice-wake", "--voice-port", str(port), "--chat-url", chat_url,
+            ]
+        else:
+            daemon_cmd = [
+                sys.executable, os.path.join(_ROOT, "main.py"),
+                "--voice-daemon", "--voice-wake", "--voice-port", str(port), "--chat-url", chat_url,
+            ]
         subprocess.Popen(
-            [sys.executable, os.path.join(_ROOT, "main.py"),
-             "--voice-daemon", "--voice-wake", "--voice-port", str(port), "--chat-url", chat_url],
+            daemon_cmd,
             cwd=_ROOT,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -1516,7 +1544,7 @@ def run_web(port: int = 8765, open_window: bool = True, standalone: bool = True)
         httpd.shutdown()
 
 
-def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
+def run_app(port: int = 8765, width: int = 980, height: int = 740, start_hidden: bool = False) -> None:
     """Запускает UI как десктопное приложение в окне pywebview (Edge WebView2).
 
     Сервер поднимается в фоновом потоке, а главный поток держит окно webview —
@@ -1558,11 +1586,12 @@ def run_app(port: int = 8765, width: int = 980, height: int = 740) -> None:
         window = webview.create_window(
             "Компас",
             app_url,
-            width=width,
-            height=height,
-            min_size=(520, 480),
-            text_select=True,
-        )
+        width=width,
+        height=height,
+        min_size=(520, 480),
+        text_select=True,
+        hidden=start_hidden,
+    )
         _APP_WINDOW = window
         icon_path = os.path.join(_ROOT, "src", "Icon_Compass.ico")
 

@@ -3,6 +3,7 @@ cache_debug.log
 cache.db
 cache.db-*
 logs/
+.cache/
 mcp_modules/UIAutomationMCP/*
 TOOLS_DOCUMENTATION.md
 @AutomationLog.txt
@@ -30,3 +31,6 @@ cc.bat
 voice/models/*
 voice/voice-daemon.log
 utils/
+dist/*
+*.egg-info/
+build/*

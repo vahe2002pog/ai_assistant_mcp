@@ -1,6 +1,6 @@
 """Единая runtime-конфигурация LLM: провайдер, базовый URL, модель.
 
-Позволяет переключать сервер (llama.cpp / Ollama) и модель на лету — все
+Позволяет переключать провайдер и модель на лету — все
 агенты берут клиента и имя модели через эти функции, поэтому изменения
 вступают в силу сразу, без перезапуска.
 
@@ -21,12 +21,6 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _STATE_PATH = os.path.join(_ROOT, "llm_config.json")
 
 PROVIDERS = {
-    "llamacpp": {
-        "label": "llama.cpp",
-        "base_url": "http://localhost:8000/v1",
-        "api_key":  "llama",
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-    },
     "ollama": {
         "label": "Ollama",
         "base_url": "http://127.0.0.1:11435/v1",
@@ -180,9 +174,9 @@ def _load() -> dict:
             s = json.load(f) or {}
     except Exception:
         s = {}
-    prov_name = s.get("provider") or os.environ.get("LLM_PROVIDER", "llamacpp")
+    prov_name = s.get("provider") or os.environ.get("LLM_PROVIDER", "ollama")
     if prov_name not in PROVIDERS:
-        prov_name = "llamacpp"
+        prov_name = "ollama"
     prov = PROVIDERS[prov_name]
 
     # Миграция: если в llm_config.json остался api_key/folder — переносим в БД и
@@ -198,9 +192,9 @@ def _load() -> dict:
         except Exception:
             pass
 
-    s.setdefault("provider", prov_name)
+    s["provider"] = prov_name
     s.setdefault("base_url", os.environ.get("API_BASE", prov["base_url"]))
-    s.setdefault("model",    os.environ.get("API_MODEL", "Qwen3.5-9B-abliterated-vision-Q4_K_M"))
+    s.setdefault("model",    os.environ.get("API_MODEL", ""))
     s.setdefault("vision_model", os.environ.get("API_VISION_MODEL", ""))
     # vision_provider/vision_base_url: пусто = использовать основные
     s.setdefault("vision_provider", "")
@@ -395,7 +389,7 @@ def get_base_url() -> str:
 
 
 def get_extra_body() -> dict:
-    prov = PROVIDERS.get(get_provider(), PROVIDERS["llamacpp"])
+    prov = PROVIDERS.get(get_provider(), PROVIDERS["custom"])
     return dict(prov["extra_body"])
 
 

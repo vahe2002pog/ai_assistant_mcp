@@ -213,6 +213,8 @@
     const files = Array.from(docUpload.files || []);
     if (!files.length) return;
     docStatus.textContent = "Загружаю " + files.length + "…";
+    let okCount = 0;
+    let lastError = "";
     for (const f of files) {
       try {
         const b64 = await readAsB64(f);
@@ -222,11 +224,13 @@
           body: JSON.stringify({ data: b64, name: f.name }),
         });
         if (!r.ok) { const j = await r.json(); throw new Error(j.error || "failed"); }
+        okCount += 1;
       } catch (e) {
-        docStatus.textContent = "Ошибка (" + f.name + "): " + e;
+        lastError = "Ошибка (" + f.name + "): " + (e && e.message ? e.message : e);
+        docStatus.textContent = lastError;
       }
     }
-    docStatus.textContent = "Готово ✓";
+    docStatus.textContent = lastError || ("Готово ✓ Загружено: " + okCount);
     docUpload.value = "";
     loadDocs();
   });

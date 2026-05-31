@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -16,7 +17,19 @@ OLLAMA_DIR = os.path.join(ROOT, "utils", "ollama")
 OLLAMA_EXE = os.path.join(OLLAMA_DIR, "ollama.exe")
 OLLAMA_HOST = "http://127.0.0.1:11435"
 OLLAMA_ENV_HOST = "127.0.0.1:11435"
-OLLAMA_MODELS_DIR = os.path.join(OLLAMA_DIR, "models")
+
+
+def _default_models_dir() -> str:
+    override = os.environ.get("COMPASS_OLLAMA_MODELS")
+    if override:
+        return override
+    program_data = os.environ.get("PROGRAMDATA")
+    if getattr(sys, "frozen", False) and program_data:
+        return os.path.join(program_data, "Compass", "ollama", "models")
+    return os.path.join(OLLAMA_DIR, "models")
+
+
+OLLAMA_MODELS_DIR = _default_models_dir()
 
 RECOMMENDED_MODELS = ("qwen3.5:2b", "qwen3.5:4b", "qwen3.5:9b")
 RECOMMENDED_MODEL_SIZES = {
@@ -74,7 +87,7 @@ def is_running(timeout: float = 0.4) -> bool:
 def _env() -> dict:
     env = os.environ.copy()
     env["OLLAMA_HOST"] = OLLAMA_ENV_HOST
-    env.setdefault("OLLAMA_MODELS", OLLAMA_MODELS_DIR)
+    env["OLLAMA_MODELS"] = OLLAMA_MODELS_DIR
     return env
 
 

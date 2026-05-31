@@ -39,6 +39,57 @@ setup_error_logging()
 os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,::1")
 os.environ.setdefault("no_proxy", "localhost,127.0.0.1,::1")
 
+_INSTANCE_MUTEX_HANDLE = None
+
+
+def _notify_existing_instance(port: int) -> None:
+    import time
+    import urllib.request
+    import webbrowser
+
+    url = f"http://127.0.0.1:{int(port)}/api/window/show"
+    for _ in range(24):
+        try:
+            req = urllib.request.Request(url, method="POST")
+            with urllib.request.urlopen(req, timeout=0.25) as resp:
+                if resp.status < 500:
+                    return
+        except Exception:
+            time.sleep(0.15)
+    try:
+        webbrowser.open(f"http://127.0.0.1:{int(port)}/?bridge=1", new=1)
+    except Exception:
+        pass
+
+
+def _acquire_single_instance(port: int) -> bool:
+    """Return False when another main Compass app is already running."""
+    global _INSTANCE_MUTEX_HANDLE
+    if os.environ.get("COMPASS_ALLOW_MULTI") == "1" or os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+
+        ctypes.set_last_error(0)
+        handle = kernel32.CreateMutexW(None, False, "Local\\CompassAssistantSingleInstance")
+        last_error = ctypes.get_last_error()
+        if not handle:
+            return True
+        if last_error == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            _notify_existing_instance(port)
+            return False
+        _INSTANCE_MUTEX_HANDLE = handle
+        return True
+    except Exception:
+        return True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Построение схем инструментов для OpenAI tool calling
@@ -522,6 +573,8 @@ def _build_args() -> argparse.Namespace:
                    help=argparse.SUPPRESS)
     p.add_argument("--voice-preload-tts", action="store_true",
                    help="Заранее скачать/проверить модель Silero TTS и выйти.")
+    p.add_argument("--rag-preload-embeddings", action="store_true",
+                   help="Заранее скачать/проверить модель эмбеддингов RAG и выйти.")
     return p.parse_args()
 
 
@@ -534,6 +587,12 @@ def main() -> None:
         print("Silero TTS model is cached.")
         return
 
+    if args.rag_preload_embeddings:
+        from ui_automation.utils import preload_huggingface_embedding
+        preload_huggingface_embedding()
+        print("RAG embedding model is cached.")
+        return
+
     if args.voice_daemon:
         from voice.daemon import run_daemon
         run_daemon(port=args.voice_port, chat_url=args.chat_url,
@@ -541,9 +600,17 @@ def main() -> None:
                    wake_enabled=args.voice_wake)
         return
 
+    if not _acquire_single_instance(args.port):
+        return
+
     from web_server import run_app
-    run_app(port=args.port)
+    run_app(port=args.port, start_hidden=bool(_COMPASS_START_MINIMIZED or getattr(args, "start_minimized", False)))
 
 
 if __name__ == "__main__":
     main()
+import sys
+
+_COMPASS_START_MINIMIZED = "--start-minimized" in sys.argv
+if _COMPASS_START_MINIMIZED:
+    sys.argv = [arg for arg in sys.argv if arg != "--start-minimized"]
